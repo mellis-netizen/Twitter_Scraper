@@ -233,11 +233,11 @@ class EmailNotifier:
                             <div>
                                 <a href="{article['link']}" class="link" target="_blank">Read Full Article →</a>
                             </div>
-                            <div style="margin-top: 10px;">
-                                {f'<span class="companies">🏢 {company}</span>' for company in alert['mentioned_companies']}
-                                {f'<span class="keywords">🔑 {keyword}</span>' for keyword in alert['found_keywords']}
-                                <span class="score">📊 Score: {alert['relevance_score']:.2f}</span>
-                            </div>
+                           <div style="margin-top: 10px;">
+  {''.join(f'<span class="companies">🏢 {c}</span>' for c in sorted(alert.get('mentioned_companies', [])))}
+  {''.join(f'<span class="keywords">🔑 {k}</span>' for k in sorted(alert.get('found_keywords', [])))}
+  <span class="score">📊 Score: {alert.get('relevance_score', 0):.2f}</span>
+</div>
                             <div style="margin-top: 10px; font-size: 14px; color: #666;">
                                 {article.get('summary', 'No summary available')[:200]}...
                             </div>
