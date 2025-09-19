@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  crypto-tge-monitor:
+    build: .
+    container_name: crypto-tge-monitor
+    restart: unless-stopped
+    environment:
+      - LOG_LEVEL=INFO
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    networks:
+      - crypto-monitor-network
+    healthcheck:
+      test: ["CMD", "python", "src/main.py", "--mode", "status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Add a reverse proxy for web interface (future enhancement)
+  nginx:
+    image: nginx:alpine
+    container_name: crypto-tge-monitor-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - crypto-tge-monitor
+    networks:
+      - crypto-monitor-network
+
+networks:
+  crypto-monitor-network:
+    driver: bridge
+
+volumes:
+  logs:
+  data:

@@ -1,0 +1,36 @@
+[Unit]
+Description=Crypto TGE Monitor Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=crypto-monitor
+Group=crypto-monitor
+WorkingDirectory=/opt/crypto-tge-monitor
+ExecStart=/opt/crypto-tge-monitor/venv/bin/python src/main.py --mode continuous
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=crypto-tge-monitor
+
+# Environment variables
+Environment=PYTHONPATH=/opt/crypto-tge-monitor
+Environment=PYTHONUNBUFFERED=1
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/crypto-tge-monitor/logs /opt/crypto-tge-monitor/data
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=1G
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
