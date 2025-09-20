@@ -114,35 +114,29 @@ NEWS_SOURCES = [
     # General crypto with strong EVM/DeFi coverage
     "https://decrypt.co/feed",
     "https://www.theblock.co/rss.xml",
-    "https://www.coindesk.com/arc/outboundfeeds/rss/",
-    
-    # Ethereum-focused categories
-    "https://www.coindesk.com/arc/outboundfeeds/rss/category/ethereum/",  # CoinDesk Ethereum
-    "https://decrypt.co/tag/ethereum/feed",  # Decrypt Ethereum tag
-    
+    "https://www.coindesk.com/arc/outboundfeeds/rss",
+        
     # DeFi / EVM native outlets
     "https://thedefiant.io/feed",  # The Defiant
-    "https://www.bankless.com/feed",  # Bankless
-    "https://dlnews.com/feed",  # DL News
-    
+    "https://www.bankless.com/feed", 
+    "https://cointelegraph.com/rss",
+    "https://cryptopotato.com/feed/",
+    "https://cryptoslate.com/feed/",
+    "https://www.dlnews.com/arc/outboundfeeds/rss/",    
     # Network ecosystem blogs (major EVM L1/L2s)
-    "https://blog.ethereum.org/feed",  # Ethereum Foundation blog
-    "https://blog.optimism.io/feed",  # Optimism
-    "https://blog.polygon.technology/rss.xml",  # Polygon
+    "https://blog.ethereum.org/en/feed.xml",
     "https://arbitrumfoundation.medium.com/feed",  # Arbitrum Foundation (Medium)
-    "https://medium.com/avalancheavax/feed",  # Avalanche
-    "https://fantom.foundation/blog/feed/",  # Fantom
+    "https://medium.com/avalancheavax",
+    "https://avalancheavax.medium.com",
+    "https://medium.com/@telosfoundation",
+    "https://blog.fantom.foundation/rss/",
     "https://blog.cronos.org/feed/",  # Cronos
     "https://medium.com/feed/@harmonyprotocol",  # Harmony
     "https://moonbeam.network/blog/feed/",  # Moonbeam/Moonriver
     "https://medium.com/feed/@klaytn_official",  # Klaytn
     "https://medium.com/feed/@CeloOrg",  # Celo
     "https://medium.com/feed/@AstarNetwork",  # Astar
-    "https://metisdao.medium.com/feed",  # Metis
-    "https://syscoin.org/news/feed/",  # Syscoin
-    "https://medium.com/feed/@telosfoundation",  # Telos
 ]
-
 # Company Twitter handles (verified and researched)
 COMPANY_TWITTERS = {
     # Project/company accounts

@@ -1,99 +1,248 @@
 """
 Email Notification System for Crypto TGE Alerts
-
-This module handles sending email notifications when TGE-related content
-is detected from news sources and Twitter.
 """
 
 import smtplib
 import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email import encoders
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional
-import os
 
-from config import EMAIL_CONFIG
+from config import EMAIL_CONFIG, COMPANIES, TGE_KEYWORDS  # COMPANIES/KEYWORDS used in footer
 
 
 class EmailNotifier:
     """Class for sending email notifications about TGE events."""
-    
+
     def __init__(self):
         self.setup_logging()
-        self.smtp_server = EMAIL_CONFIG['smtp_server']
-        self.smtp_port = EMAIL_CONFIG['smtp_port']
-        self.email_user = EMAIL_CONFIG['email_user']
-        self.email_password = EMAIL_CONFIG['email_password']
-        self.recipient_email = EMAIL_CONFIG['recipient_email']
-        
+        self.smtp_server = EMAIL_CONFIG.get('smtp_server')
+        self.smtp_port = EMAIL_CONFIG.get('smtp_port')
+        self.email_user = EMAIL_CONFIG.get('email_user')
+        self.email_password = EMAIL_CONFIG.get('email_password')
+        self.recipient_email = EMAIL_CONFIG.get('recipient_email')
+
         # Check if email is configured
-        if not all([self.email_user, self.email_password, self.recipient_email]):
+        if not all([self.smtp_server, self.smtp_port, self.email_user, self.email_password, self.recipient_email]):
             self.logger.warning("Email configuration incomplete. Email notifications will be disabled.")
             self.enabled = False
         else:
             self.enabled = True
-    
+
     def setup_logging(self):
         """Setup logging configuration."""
-        self.logger = logging.getLogger(__name__)
-    
-    def send_tge_alert_email(self, news_alerts: List[Dict], twitter_alerts: List[Dict]) -> bool:
+        self.logger = logging.getLogger("email_notifier")
+
+    # -------------------------
+    # Low-level send helper (with detailed SMTP logging)
+    # -------------------------
+    def _send_email(self, subject: str, html: str, text: Optional[str] = None) -> bool:
+        if not self.enabled:
+            self.logger.warning("Email notifications disabled - configuration incomplete")
+            return False
+
+        # Build MIME message (HTML + optional plain text)
+        msg = MIMEMultipart('alternative')
+        msg['From'] = self.email_user
+        msg['To'] = self.recipient_email
+        msg['Subject'] = subject
+        if text:
+            msg.attach(MIMEText(text, 'plain', 'utf-8'))
+        msg.attach(MIMEText(html, 'html', 'utf-8'))
+
+        try:
+            use_ssl = str(self.smtp_port) == "465"
+            if use_ssl:
+                server = smtplib.SMTP_SSL(self.smtp_server, self.smtp_port, timeout=20)
+            else:
+                server = smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=20)
+
+            try:
+                # Enable verbose SMTP transcript in logs
+                server.set_debuglevel(1)
+                self.logger.info("Connecting to SMTP %s:%s (SSL=%s)", self.smtp_server, self.smtp_port, use_ssl)
+
+                # EHLO before auth (and before STARTTLS on 587)
+                code, hello = server.ehlo()
+                self.logger.info("SMTP EHLO: %s %s", code, hello)
+
+                if not use_ssl:
+                    # 587 path: STARTTLS upgrade
+                    code, resp = server.starttls()
+                    self.logger.info("SMTP STARTTLS: %s %s", code, resp)
+                    code, hello2 = server.ehlo()
+                    self.logger.info("SMTP EHLO (post-TLS): %s %s", code, hello2)
+
+                # Login
+                server.login(self.email_user, self.email_password)
+                self.logger.info("SMTP login OK for %s", self.email_user)
+
+                # Support multiple recipients separated by commas
+                from_addr = self.email_user
+                to_addrs = [a.strip() for a in self.recipient_email.split(",") if a.strip()]
+
+                # Use sendmail so we can inspect refused recipients
+                refused = server.sendmail(from_addr, to_addrs, msg.as_string())
+
+                if refused:
+                    # Dict of {recipient: (code, resp)} for failures
+                    self.logger.error("SMTP refused recipients: %s", refused)
+                    return False
+
+                self.logger.info("Email accepted by SMTP server for: %s", to_addrs)
+                return True
+
+            finally:
+                try:
+                    server.quit()
+                except Exception:
+                    server.close()
+
+        except smtplib.SMTPAuthenticationError as e:
+            self.logger.error("SMTP authentication failed: %s", e, exc_info=True)
+            return False
+        except smtplib.SMTPRecipientsRefused as e:
+            self.logger.error("All recipients refused: %s", getattr(e, "recipients", {}), exc_info=True)
+            return False
+        except smtplib.SMTPException as e:
+            self.logger.error("SMTP error: %s", e, exc_info=True)
+            return False
+        except Exception as e:
+            self.logger.error("Unexpected error sending email: %s", e, exc_info=True)
+            return False
+
+    # -------------------------
+    # Public API
+    # -------------------------
+    def send_tge_alert_email(
+        self,
+        news_alerts: List[Dict],
+        twitter_alerts: List[Dict],
+        meta: Optional[Dict] = None,
+    ) -> bool:
         """Send email with TGE alerts from news and Twitter."""
         if not self.enabled:
             self.logger.warning("Email notifications disabled - configuration incomplete")
             return False
-        
+
+        # Even if there are no alerts, return True (pipeline shouldn’t error on “nothing found”)
         if not news_alerts and not twitter_alerts:
             self.logger.info("No TGE alerts to send")
             return True
-        
-        try:
-            # Create email content
-            subject = self._generate_email_subject(news_alerts, twitter_alerts)
-            body = self._generate_email_body(news_alerts, twitter_alerts)
-            
-            # Create message
-            msg = MIMEMultipart('alternative')
-            msg['From'] = self.email_user
-            msg['To'] = self.recipient_email
-            msg['Subject'] = subject
-            
-            # Add HTML body
-            html_body = MIMEText(body, 'html')
-            msg.attach(html_body)
-            
-            # Send email
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.email_user, self.email_password)
-                server.send_message(msg)
-            
-            self.logger.info(f"TGE alert email sent successfully to {self.recipient_email}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to send TGE alert email: {str(e)}")
+
+        meta = meta or {}
+        subject = self._generate_email_subject(news_alerts, twitter_alerts, meta)
+        body = self._generate_email_body(news_alerts, twitter_alerts, meta)
+        return self._send_email(subject, body)
+
+    def send_test_email(self) -> bool:
+        """
+        Lightweight test used by test_components().
+        Sends a small HTML test so the full SMTP path is exercised.
+        """
+        if not self.enabled:
+            self.logger.warning("Email notifications disabled - cannot send test email.")
             return False
-    
-    def _generate_email_subject(self, news_alerts: List[Dict], twitter_alerts: List[Dict]) -> str:
-        """Generate email subject line."""
-        total_alerts = len(news_alerts) + len(twitter_alerts)
-        
-        if total_alerts == 1:
-            if news_alerts:
-                company = news_alerts[0]['mentioned_companies'][0] if news_alerts[0]['mentioned_companies'] else 'Unknown'
-                return f"🚀 TGE Alert: {company} Token Generation Event Detected"
-            else:
-                company = twitter_alerts[0]['mentioned_companies'][0] if twitter_alerts[0]['mentioned_companies'] else 'Unknown'
-                return f"🐦 TGE Tweet Alert: {company} Token Generation Event"
-        else:
-            return f"🚀 {total_alerts} TGE Alerts Detected - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
-    
-    def _generate_email_body(self, news_alerts: List[Dict], twitter_alerts: List[Dict]) -> str:
-        """Generate HTML email body."""
+
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        subject = "🧪 Crypto TGE Monitor — Test Email"
+        html = f"""
+        <html><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
+            <h2>✅ Crypto TGE Monitor — Test Email</h2>
+            <p>This is a connectivity test from the monitor.</p>
+            <p><strong>Time:</strong> {ts}</p>
+        </body></html>
+        """
+        return self._send_email(subject, html, f"Crypto TGE Monitor test at {ts}")
+
+    def send_daily_summary(self, news_count: int, twitter_count: int, total_processed: int) -> bool:
+        """Send daily summary email."""
+        if not self.enabled:
+            return False
+        try:
+            subject = f"📊 Daily TGE Monitor Summary - {datetime.now().strftime('%Y-%m-%d')}"
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head><meta charset="UTF-8"></head>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <div style="max-width:600px;margin:0 auto;padding:20px;">
+                    <h2>📊 Daily Summary — {datetime.now().strftime('%Y-%m-%d')}</h2>
+                    <ul>
+                        <li><strong>Total processed</strong>: {total_processed}</li>
+                        <li><strong>News alerts</strong>: {news_count}</li>
+                        <li><strong>Twitter alerts</strong>: {twitter_count}</li>
+                    </ul>
+                </div>
+            </body>
+            </html>
+            """
+            return self._send_email(subject, html)
+        except Exception as e:
+            self.logger.error("Failed to send daily summary email: %s", e, exc_info=True)
+            return False
+
+    # -------------------------
+    # Rendering helpers
+    # -------------------------
+    def _generate_email_subject(
+        self,
+        news_alerts: List[Dict],
+        twitter_alerts: List[Dict],
+        meta: Dict
+    ) -> str:
+        total = len(news_alerts) + len(twitter_alerts)
+        rl = " (partial, rate-limited)" if meta.get("twitter_rate_limited") else ""
+        if total == 0:
+            return f"Crypto TGE Monitor — No alerts{rl}"
+        if total == 1:
+            src = (news_alerts or twitter_alerts)[0]
+            companies = src.get("mentioned_companies") or []
+            label = companies[0] if companies else "Unknown"
+            return f"🚀 TGE Alert: {label}{rl}"
+        return f"🚀 {total} TGE Alerts Detected{rl} - {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+    def _news_item_from_alert(self, alert: Dict) -> Dict:
+        """
+        Normalize both shapes:
+        - flat: {'title','link','summary','published','source',...}
+        - nested: {'article': {...}, ...}
+        """
+        if "article" in alert and isinstance(alert["article"], dict):
+            art = alert["article"]
+            return {
+                "title": art.get("title"),
+                "link": art.get("link"),
+                "summary": art.get("summary"),
+                "published": art.get("published"),
+                "source_name": art.get("source_name") or alert.get("source") or "",
+            }
+        # flat
+        return {
+            "title": alert.get("title"),
+            "link": alert.get("link"),
+            "summary": alert.get("summary"),
+            "published": alert.get("published"),
+            "source_name": alert.get("source") or "",
+        }
+
+    def _generate_email_body(
+        self,
+        news_alerts: List[Dict],
+        twitter_alerts: List[Dict],
+        meta: Dict
+    ) -> str:
+        ts = datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+        rl_banner = ""
+        if meta.get("twitter_rate_limited"):
+            rl_banner = (
+                '<div style="background:#fff3cd;border:1px solid #ffeeba;padding:10px;'
+                'border-radius:6px;margin-bottom:16px;">'
+                '⚠️ Twitter/API rate limiting detected this cycle — results may be partial.'
+                '</div>'
+            )
+
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -115,91 +264,24 @@ class EmailNotifier:
                     padding: 30px;
                     box-shadow: 0 2px 10px rgba(0,0,0,0.1);
                 }}
-                .header {{
-                    text-align: center;
-                    border-bottom: 3px solid #007bff;
-                    padding-bottom: 20px;
-                    margin-bottom: 30px;
+                .header {{ text-align: center; border-bottom: 3px solid #007bff; padding-bottom: 20px; margin-bottom: 20px; }}
+                .alert-section {{ margin-bottom: 30px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }}
+                .alert-header {{ background-color: #007bff; color: white; padding: 12px 16px; font-weight: bold; font-size: 16px; }}
+                .alert-content {{ padding: 16px; }}
+                .alert-item {{ border-bottom: 1px solid #f0f0f0; padding: 14px 0; }}
+                .alert-item:last-child {{ border-bottom: none; }}
+                .alert-title {{ font-size: 15px; font-weight: 600; color: #007bff; margin-bottom: 6px; }}
+                .alert-meta {{ font-size: 13px; color: #666; margin-bottom: 8px; }}
+                .companies, .keywords, .score {{
+                    padding: 6px 10px; border-radius: 5px; margin: 3px 4px 0 0; display: inline-block;
                 }}
-                .alert-section {{
-                    margin-bottom: 40px;
-                    border: 1px solid #e0e0e0;
-                    border-radius: 8px;
-                    overflow: hidden;
-                }}
-                .alert-header {{
-                    background-color: #007bff;
-                    color: white;
-                    padding: 15px 20px;
-                    font-weight: bold;
-                    font-size: 18px;
-                }}
-                .alert-content {{
-                    padding: 20px;
-                }}
-                .alert-item {{
-                    border-bottom: 1px solid #f0f0f0;
-                    padding: 20px 0;
-                }}
-                .alert-item:last-child {{
-                    border-bottom: none;
-                }}
-                .alert-title {{
-                    font-size: 16px;
-                    font-weight: bold;
-                    color: #007bff;
-                    margin-bottom: 10px;
-                }}
-                .alert-meta {{
-                    font-size: 14px;
-                    color: #666;
-                    margin-bottom: 10px;
-                }}
-                .companies {{
-                    background-color: #e8f4fd;
-                    padding: 8px 12px;
-                    border-radius: 5px;
-                    margin: 5px 0;
-                    display: inline-block;
-                }}
-                .keywords {{
-                    background-color: #fff3cd;
-                    padding: 8px 12px;
-                    border-radius: 5px;
-                    margin: 5px 0;
-                    display: inline-block;
-                }}
-                .score {{
-                    background-color: #d4edda;
-                    padding: 8px 12px;
-                    border-radius: 5px;
-                    margin: 5px 0;
-                    display: inline-block;
-                    font-weight: bold;
-                }}
-                .tweet-content {{
-                    background-color: #f8f9fa;
-                    padding: 15px;
-                    border-radius: 5px;
-                    border-left: 4px solid #007bff;
-                    margin: 10px 0;
-                    font-style: italic;
-                }}
-                .footer {{
-                    text-align: center;
-                    margin-top: 30px;
-                    padding-top: 20px;
-                    border-top: 1px solid #e0e0e0;
-                    color: #666;
-                    font-size: 12px;
-                }}
-                .link {{
-                    color: #007bff;
-                    text-decoration: none;
-                }}
-                .link:hover {{
-                    text-decoration: underline;
-                }}
+                .companies {{ background-color: #e8f4fd; }}
+                .keywords  {{ background-color: #fff3cd; }}
+                .score     {{ background-color: #d4edda; font-weight: 600; }}
+                .tweet-content {{ background:#f8f9fa; padding: 12px; border-radius: 5px; border-left: 4px solid #007bff; margin: 8px 0; font-style: italic; }}
+                .footer {{ text-align: center; margin-top: 20px; padding-top: 12px; border-top: 1px solid #e0e0e0; color: #666; font-size: 12px; }}
+                .link {{ color: #007bff; text-decoration: none; }}
+                .link:hover {{ text-decoration: underline; }}
             </style>
         </head>
         <body>
@@ -207,266 +289,103 @@ class EmailNotifier:
                 <div class="header">
                     <h1>🚀 Crypto TGE Monitor Alert</h1>
                     <p>Token Generation Event Detection Report</p>
-                    <p><strong>{datetime.now().strftime('%Y-%m-%d %H:%M UTC')}</strong></p>
+                    <p><strong>{ts}</strong></p>
+                    {rl_banner}
                 </div>
         """
-        
-        # Add news alerts section
+
+        # News section
         if news_alerts:
             html += f"""
                 <div class="alert-section">
-                    <div class="alert-header">
-                        📰 News Alerts ({len(news_alerts)} found)
-                    </div>
+                    <div class="alert-header">📰 News Alerts ({len(news_alerts)} found)</div>
                     <div class="alert-content">
             """
-            
             for alert in news_alerts:
-                article = alert['article']
+                art = self._news_item_from_alert(alert)
+                pubs = art.get('published')
+                if isinstance(pubs, datetime):
+                    try:
+                        if pubs.tzinfo is None:
+                            pubs = pubs.replace(tzinfo=timezone.utc)
+                        pub_str = pubs.strftime('%Y-%m-%d %H:%M UTC')
+                    except Exception:
+                        pub_str = str(pubs)
+                else:
+                    pub_str = 'Unknown'
+
+                comps = ''.join(f'<span class="companies">🏢 {c}</span>'
+                                for c in sorted(alert.get('mentioned_companies', [])))
+                keys  = ''.join(f'<span class="keywords">🔑 {k}</span>'
+                                for k in sorted(alert.get('found_keywords', [])))
+                score = f'<span class="score">📊 Score: {alert.get("relevance_score", 0):.2f}</span>'
+
                 html += f"""
                         <div class="alert-item">
-                            <div class="alert-title">{article['title']}</div>
+                            <div class="alert-title">{(art.get('title') or 'Untitled')}</div>
                             <div class="alert-meta">
-                                <strong>Source:</strong> {article['source_name']} | 
-                                <strong>Published:</strong> {article['published'].strftime('%Y-%m-%d %H:%M UTC') if article['published'] else 'Unknown'}
+                                <strong>Source:</strong> {art.get('source_name','')} |
+                                <strong>Published:</strong> {pub_str}
                             </div>
-                            <div>
-                                <a href="{article['link']}" class="link" target="_blank">Read Full Article →</a>
-                            </div>
-                           <div style="margin-top: 10px;">
-  {''.join(f'<span class="companies">🏢 {c}</span>' for c in sorted(alert.get('mentioned_companies', [])))}
-  {''.join(f'<span class="keywords">🔑 {k}</span>' for k in sorted(alert.get('found_keywords', [])))}
-  <span class="score">📊 Score: {alert.get('relevance_score', 0):.2f}</span>
-</div>
-                            <div style="margin-top: 10px; font-size: 14px; color: #666;">
-                                {article.get('summary', 'No summary available')[:200]}...
+                            <div><a href="{art.get('link') or '#'}" class="link" target="_blank">Read Full Article →</a></div>
+                            <div style="margin-top: 8px;">{comps}{keys}{score}</div>
+                            <div style="margin-top: 8px; font-size: 14px; color: #666;">
+                                {(art.get('summary') or 'No summary available')[:200]}...
                             </div>
                         </div>
                 """
-            
-            html += """
-                    </div>
-                </div>
-            """
-        
-        # Add Twitter alerts section
+            html += "</div></div>"
+
+        # Twitter section
         if twitter_alerts:
             html += f"""
                 <div class="alert-section">
-                    <div class="alert-header">
-                        🐦 Twitter Alerts ({len(twitter_alerts)} found)
-                    </div>
+                    <div class="alert-header">🐦 Twitter Alerts ({len(twitter_alerts)} found)</div>
                     <div class="alert-content">
             """
-            
             for alert in twitter_alerts:
-                tweet = alert['tweet']
+                tweet = alert.get('tweet', {})
+                ts_t = tweet.get('created_at')
+                if isinstance(ts_t, datetime):
+                    try:
+                        if ts_t.tzinfo is None:
+                            ts_t = ts_t.replace(tzinfo=timezone.utc)
+                        ts_str = ts_t.strftime('%Y-%m-%d %H:%M UTC')
+                    except Exception:
+                        ts_str = str(ts_t)
+                else:
+                    ts_str = 'Unknown'
+
+                comps = ''.join(f'<span class="companies">🏢 {c}</span>'
+                                for c in sorted(alert.get('mentioned_companies', [])))
+                keys  = ''.join(f'<span class="keywords">🔑 {k}</span>'
+                                for k in sorted(alert.get('found_keywords', [])))
+                score = f'<span class="score">📊 Score: {alert.get("relevance_score", 0):.2f}</span>'
+
                 html += f"""
                         <div class="alert-item">
-                            <div class="alert-title">@{tweet['user']['screen_name']} - {tweet['user']['name']}</div>
+                            <div class="alert-title">@{tweet.get('user',{}).get('screen_name','unknown')} - {tweet.get('user',{}).get('name','Unknown')}</div>
                             <div class="alert-meta">
-                                <strong>Posted:</strong> {tweet['created_at'].strftime('%Y-%m-%d %H:%M UTC')} | 
-                                <strong>Engagement:</strong> {tweet['retweet_count']} RTs, {tweet['favorite_count']} Likes | 
-                                <strong>Followers:</strong> {tweet['user']['followers_count']:,}
+                                <strong>Posted:</strong> {ts_str} |
+                                <strong>Engagement:</strong> {tweet.get('retweet_count',0)} RTs, {tweet.get('favorite_count',0)} Likes |
+                                <strong>Followers:</strong> {tweet.get('user',{}).get('followers_count',0):,}
                             </div>
-                            <div>
-                                <a href="{tweet['url']}" class="link" target="_blank">View Tweet →</a>
-                            </div>
-                            <div class="tweet-content">
-                                {tweet['text']}
-                            </div>
-                            <div style="margin-top: 10px;">
-                                {f'<span class="companies">🏢 {company}</span>' for company in alert['mentioned_companies']}
-                                {f'<span class="keywords">🔑 {keyword}</span>' for keyword in alert['found_keywords']}
-                                <span class="score">📊 Score: {alert['relevance_score']:.2f}</span>
-                            </div>
+                            <div><a href="{tweet.get('url') or '#'}" class="link" target="_blank">View Tweet →</a></div>
+                            <div class="tweet-content">{tweet.get('text','')}</div>
+                            <div style="margin-top: 8px;">{comps}{keys}{score}</div>
                         </div>
                 """
-            
-            html += """
-                    </div>
-                </div>
-            """
-        
-        # Add footer
+            html += "</div></div>"
+
+        # Footer
         html += f"""
                 <div class="footer">
                     <p>This alert was generated by the Crypto TGE Monitor system.</p>
                     <p>Monitor configured for {len(COMPANIES)} companies and {len(TGE_KEYWORDS)} TGE keywords.</p>
-                    <p>Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
+                    <p>Last updated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
                 </div>
             </div>
         </body>
         </html>
         """
-        
         return html
-    
-    def send_test_email(self) -> bool:
-        """Send a test email to verify configuration."""
-        if not self.enabled:
-            self.logger.warning("Email notifications disabled - configuration incomplete")
-            return False
-        
-        try:
-            subject = "🧪 Crypto TGE Monitor - Test Email"
-            body = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                    .header {{ background-color: #007bff; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }}
-                    .content {{ background-color: #f8f9fa; padding: 20px; border-radius: 0 0 5px 5px; }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="header">
-                        <h1>🧪 Test Email</h1>
-                    </div>
-                    <div class="content">
-                        <p><strong>Crypto TGE Monitor Test Email</strong></p>
-                        <p>This is a test email to verify that the email notification system is working correctly.</p>
-                        <p><strong>Timestamp:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}</p>
-                        <p>If you received this email, the notification system is properly configured!</p>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
-            
-            msg = MIMEMultipart('alternative')
-            msg['From'] = self.email_user
-            msg['To'] = self.recipient_email
-            msg['Subject'] = subject
-            
-            html_body = MIMEText(body, 'html')
-            msg.attach(html_body)
-            
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.email_user, self.email_password)
-                server.send_message(msg)
-            
-            self.logger.info(f"Test email sent successfully to {self.recipient_email}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to send test email: {str(e)}")
-            return False
-    
-    def send_daily_summary(self, news_count: int, twitter_count: int, total_processed: int) -> bool:
-        """Send daily summary email."""
-        if not self.enabled:
-            return False
-        
-        try:
-            subject = f"📊 Daily TGE Monitor Summary - {datetime.now().strftime('%Y-%m-%d')}"
-            
-            body = f"""
-            <!DOCTYPE html>
-            <html>
-            <head>
-                <meta charset="UTF-8">
-                <style>
-                    body {{ font-family: Arial, sans-serif; line-height: 1.6; color: #333; }}
-                    .container {{ max-width: 600px; margin: 0 auto; padding: 20px; }}
-                    .header {{ background-color: #28a745; color: white; padding: 20px; text-align: center; border-radius: 5px 5px 0 0; }}
-                    .content {{ background-color: #f8f9fa; padding: 20px; border-radius: 0 0 5px 5px; }}
-                    .stat {{ background-color: white; padding: 15px; margin: 10px 0; border-radius: 5px; border-left: 4px solid #28a745; }}
-                </style>
-            </head>
-            <body>
-                <div class="container">
-                    <div class="header">
-                        <h1>📊 Daily Summary</h1>
-                        <p>Crypto TGE Monitor - {datetime.now().strftime('%Y-%m-%d')}</p>
-                    </div>
-                    <div class="content">
-                        <div class="stat">
-                            <h3>📰 News Articles Processed</h3>
-                            <p><strong>{total_processed}</strong> articles analyzed</p>
-                        </div>
-                        <div class="stat">
-                            <h3>🚀 TGE Alerts Found</h3>
-                            <p><strong>{news_count}</strong> news alerts</p>
-                            <p><strong>{twitter_count}</strong> Twitter alerts</p>
-                        </div>
-                        <div class="stat">
-                            <h3>📈 System Status</h3>
-                            <p>✅ All monitoring systems operational</p>
-                            <p>✅ Email notifications working</p>
-                        </div>
-                    </div>
-                </div>
-            </body>
-            </html>
-            """
-            
-            msg = MIMEMultipart('alternative')
-            msg['From'] = self.email_user
-            msg['To'] = self.recipient_email
-            msg['Subject'] = subject
-            
-            html_body = MIMEText(body, 'html')
-            msg.attach(html_body)
-            
-            with smtplib.SMTP(self.smtp_server, self.smtp_port) as server:
-                server.starttls()
-                server.login(self.email_user, self.email_password)
-                server.send_message(msg)
-            
-            self.logger.info(f"Daily summary email sent to {self.recipient_email}")
-            return True
-            
-        except Exception as e:
-            self.logger.error(f"Failed to send daily summary email: {str(e)}")
-            return False
-
-
-if __name__ == "__main__":
-    notifier = EmailNotifier()
-    
-    # Test email functionality
-    print("Testing email configuration...")
-    if notifier.send_test_email():
-        print("✅ Test email sent successfully!")
-    else:
-        print("❌ Failed to send test email")
-    
-    # Test with sample data
-    sample_news_alert = {
-        'article': {
-            'title': 'Sample TGE Announcement',
-            'link': 'https://example.com',
-            'published': datetime.now(),
-            'source_name': 'Test Source',
-            'summary': 'This is a test TGE announcement for demonstration purposes.'
-        },
-        'mentioned_companies': ['Test Company'],
-        'found_keywords': ['TGE', 'token launch'],
-        'relevance_score': 0.85
-    }
-    
-    sample_twitter_alert = {
-        'tweet': {
-            'text': 'Excited to announce our TGE is coming soon! 🚀',
-            'user': {'screen_name': 'testuser', 'name': 'Test User', 'followers_count': 1000},
-            'created_at': datetime.now(),
-            'url': 'https://twitter.com/testuser/status/123',
-            'retweet_count': 10,
-            'favorite_count': 50
-        },
-        'mentioned_companies': ['Test Company'],
-        'found_keywords': ['TGE'],
-        'relevance_score': 0.75
-    }
-    
-    print("\nTesting TGE alert email...")
-    if notifier.send_tge_alert_email([sample_news_alert], [sample_twitter_alert]):
-        print("✅ TGE alert email sent successfully!")
-    else:
-        print("❌ Failed to send TGE alert email")
