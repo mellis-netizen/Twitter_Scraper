@@ -18,7 +18,7 @@ import threading
 import traceback
 
 # Import our modules (script mode: run with PYTHONPATH=.)
-from news_scraper import NewsScraper
+from .news_scraper import NewsScraper  
 from email_notifier import EmailNotifier
 from twitter_monitor import TwitterMonitor
 from config import COMPANIES, NEWS_SOURCES, LOG_CONFIG, TGE_KEYWORDS
