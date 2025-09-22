@@ -1,431 +1,272 @@
-"""
-Twitter Monitoring Module for Crypto TGE Events
-
-This module handles Twitter API integration to monitor crypto-related accounts
-for TGE announcements and relevant news.
-"""
-
-import logging
-from datetime import datetime, timezone, timedelta
-from typing import List, Dict, Set, Optional
+import os
+import re
+import json
 import time
+import logging
+from typing import List, Dict, Optional
+from datetime import datetime
+from urllib.parse import quote_plus
 
 import tweepy
-from tweepy.errors import TooManyRequests, Forbidden
+from tweepy.errors import TooManyRequests, HTTPException
 
-from config import TWITTER_CONFIG, TWITTER_ACCOUNTS, COMPANIES, TGE_KEYWORDS
-from utils import (
-    retry_on_failure, generate_content_hash, is_content_duplicate,
-    sanitize_text, calculate_relevance_score, is_recent_content,
-    save_json_file, load_json_file, truncate_text
-)
+from config import COMPANIES, TGE_KEYWORDS
+
+# ------------------ persistent since_id per user/search ------------------
+
+STATE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "state")
+SINCE_PATH = os.path.join(STATE_DIR, "twitter_since.json")
 
 
-def _to_aware_utc(dt):
-    """Coerce datetime to tz-aware UTC (handles naive datetimes)."""
-    if dt is None:
-        return None
-    if isinstance(dt, datetime):
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt.astimezone(timezone.utc)
-    return dt
+def _load_since_map() -> dict:
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        if os.path.isfile(SINCE_PATH):
+            with open(SINCE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
 
+
+def _save_since_map(since_map: dict) -> None:
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = SINCE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(since_map, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, SINCE_PATH)
+
+
+# ------------------ helpers ------------------
+
+def _has_token(text: str, token: str) -> bool:
+    token = token.strip()
+    if not token:
+        return False
+    return re.search(rf"\b{re.escape(token)}\b", text, flags=re.IGNORECASE) is not None
+
+
+def _matches_company_and_keyword(text: str) -> bool:
+    if not text:
+        return False
+    company_hit = False
+    for c in COMPANIES:
+        if isinstance(c, dict):
+            names = [c.get("name", "")] + (c.get("aliases", []) or [])
+        else:
+            names = [str(c)]
+        if any(_has_token(text, n) for n in names if n):
+            company_hit = True
+            break
+    if not company_hit:
+        return False
+    keyword_hit = any(_has_token(text, k) for k in TGE_KEYWORDS)
+    return company_hit and keyword_hit
+
+
+def _call_with_backoff(fn, *args, **kwargs):
+    delay = 60
+    for _ in range(6):
+        try:
+            return fn(*args, **kwargs)
+        except TooManyRequests:
+            time.sleep(delay)
+            delay = min(delay * 2, 15 * 60)
+        except HTTPException:
+            time.sleep(delay)
+            delay = min(delay * 2, 10 * 60)
+    raise RuntimeError("Twitter API retries exhausted")
+
+
+# ------------------ monitor class ------------------
 
 class TwitterMonitor:
-    """Class for monitoring Twitter accounts for TGE-related content."""
+    """
+    Twitter monitor that:
+    - pulls user timelines incrementally using since_id
+    - optionally runs combined (company AND keyword) searches
+    - returns a list of alert dicts expected by main/email
+    """
 
-    def __init__(self, state_file: str = 'logs/twitter_monitor_state.json'):
-        self.setup_logging()
-        self.api = None  # v1.1 not used
-        self.client: Optional[tweepy.Client] = None  # v2 client
-        self.processed_tweets: Set[str] = set()
-        self.tge_tweets: List[Dict] = []
-        self.seen_content_hashes: Set[str] = set()
-        self.state_file = state_file
-        self.rate_limited = False
-        self._last_warnings = {"rate_limited": False, "forbidden": False, "disabled": False}
-
-        # Load persistent state
-        self.load_state()
-
-        self._setup_twitter_api()
-        self.logger.info("TwitterMonitor initialized successfully")
-
-    def setup_logging(self):
-        """Setup logging configuration."""
+    def __init__(self):
         self.logger = logging.getLogger("twitter_monitor")
 
-    def load_state(self):
-        """Load persistent state from file."""
-        state = load_json_file(self.state_file, {})
-        if state:
-            self.processed_tweets = set(state.get('processed_tweets', []))
-            self.seen_content_hashes = set(state.get('seen_content_hashes', []))
-            self.tge_tweets = state.get('tge_tweets', [])
-            self.logger.info(
-                f"Loaded state: {len(self.processed_tweets)} processed tweets, {len(self.tge_tweets)} TGE tweets"
-            )
-
-    def save_state(self):
-        """Save persistent state to file."""
-        state = {
-            'processed_tweets': list(self.processed_tweets),
-            'seen_content_hashes': list(self.seen_content_hashes),
-            'tge_tweets': self.tge_tweets,
-            'last_updated': datetime.now(timezone.utc).isoformat()
-        }
-        if save_json_file(self.state_file, state):
-            self.logger.debug("State saved successfully")
-        else:
-            self.logger.warning("Failed to save state")
-
-    def _setup_twitter_api(self):
-        """Initialize Twitter API v2 client (v1.1 timeline is not available on most tiers)."""
-        try:
-            self.api = None  # don't use v1.1
-            if TWITTER_CONFIG.get('bearer_token'):
-                # Non-blocking on rate limits: we handle TooManyRequests ourselves
-                self.client = tweepy.Client(
-                    bearer_token=TWITTER_CONFIG['bearer_token'],
-                    wait_on_rate_limit=False
-                )
-                self.logger.info("Twitter v2 client initialized")
-            else:
-                self.client = None
-                self._last_warnings["disabled"] = True
-                self.logger.warning("No bearer_token configured; Twitter monitoring disabled.")
-        except Exception as e:
-            self.logger.error(f"Failed to initialize Twitter client: {e}", exc_info=True)
-            self.api = None
+        bearer = os.getenv("TWITTER_BEARER_TOKEN")
+        if not bearer:
+            self.logger.warning("TWITTER_BEARER_TOKEN missing; Twitter monitoring disabled")
             self.client = None
-            self._last_warnings["disabled"] = True
+            self.api = None
+            self._since = {}
+            self.accounts: list[str] = []
+            self.search_enabled = False
+            return
 
-    # Do not retry TooManyRequests here (that would block/sleep)
-    @retry_on_failure(max_retries=2, delay=3.0, exceptions=(tweepy.TwitterServerError,))
-    def fetch_user_tweets(self, username: str, count: int = 50) -> List[Dict]:
-        """
-        Fetch recent tweets from a specific user via v2 recent search:
-        uses `from:username -is:retweet -is:reply lang:en`.
-        Non-blocking on rate limits (returns partial/empty and continues).
-        """
-        if not self.client:
-            self.logger.warning("Twitter Client v2 not available")
-            self._last_warnings["disabled"] = True
-            return []
+        self.client = tweepy.Client(bearer_token=bearer, wait_on_rate_limit=False)
+        self.api = self.client  # maintain attribute used elsewhere
 
-        try:
-            username = username.lstrip('@')
-            query = f'from:{username} -is:retweet -is:reply lang:en'
-            resp = self.client.search_recent_tweets(
-                query=query,
-                max_results=min(count, 100),
-                tweet_fields=['created_at', 'public_metrics', 'author_id'],
-                user_fields=['username', 'name', 'public_metrics'],
-                expansions=['author_id'],
-            )
-            if not resp or not resp.data:
-                self.logger.info(f"No recent tweets found for @{username}")
-                return []
+        # Accounts: prefer a config var if you have one; else env comma list
+        env_users = os.getenv("TWITTER_USERS", "").strip()
+        self.accounts = [u.strip().lstrip("@") for u in env_users.split(",") if u.strip()]  # e.g. "OffchainLabs,arbitrum"
 
-            users = {u.id: u for u in (resp.includes.get('users') or [])}
-            out: List[Dict] = []
-            for t in resp.data:
-                u = users.get(t.author_id)
-                out.append({
-                    'id': str(t.id),
-                    'text': sanitize_text(t.text),
-                    'created_at': _to_aware_utc(t.created_at),  # ensure aware UTC
-                    'user': {
-                        'screen_name': (u.username if u else username),
-                        'name': (u.name if u else username),
-                        'followers_count': (u.public_metrics or {}).get('followers_count', 0) if u else 0,
-                    },
-                    'retweet_count': (t.public_metrics or {}).get('retweet_count', 0),
-                    'favorite_count': (t.public_metrics or {}).get('like_count', 0),
-                    'url': f"https://twitter.com/{(u.username if u else username)}/status/{t.id}",
-                })
+        # Toggle search if desired (default on)
+        self.search_enabled = os.getenv("TWITTER_ENABLE_SEARCH", "1") not in {"0", "false", "False"}
 
-            self.logger.info(f"Fetched {len(out)} tweets from @{username} (v2 search)")
-            return out
+        self._since = _load_since_map()
 
-        except TooManyRequests as e:
-            self.logger.warning(f"Rate limit exceeded for @{username}; continuing without waiting. {e}")
-            self.rate_limited = True
-            self._last_warnings["rate_limited"] = True
-            return []
-        except Forbidden as e:
-            # Some accounts or queries are not allowed on certain tiers
-            self.logger.warning(f"Forbidden fetching @{username} (v2 search): {e}")
-            self._last_warnings["forbidden"] = True
-            return []
-        except Exception as e:
-            self.logger.error(f"Error fetching tweets from @{username}: {e}", exc_info=True)
-            return []
-
-    def search_tweets(self, query: str, count: int = 100) -> List[Dict]:
-        """Search for tweets using Twitter API v2 (non-blocking on RL)."""
-        if not self.client:
-            self.logger.warning("Twitter Client v2 not available")
-            self._last_warnings["disabled"] = True
-            return []
-
-        try:
-            resp = self.client.search_recent_tweets(
-                query=query,
-                max_results=min(count, 100),
-                tweet_fields=['created_at', 'public_metrics', 'author_id'],
-                user_fields=['username', 'name', 'public_metrics'],
-                expansions=['author_id'],
-            )
-            if not resp or not resp.data:
-                return []
-
-            users = {u.id: u for u in (resp.includes.get('users') or [])}
-            processed_tweets: List[Dict] = []
-            for t in resp.data:
-                u = users.get(t.author_id)
-                processed_tweets.append({
-                    'id': str(t.id),
-                    'text': sanitize_text(t.text),
-                    'created_at': _to_aware_utc(t.created_at),  # ensure aware UTC
-                    'user': {
-                        'screen_name': (u.username if u else 'unknown'),
-                        'name': (u.name if u else 'unknown'),
-                        'followers_count': (u.public_metrics or {}).get('followers_count', 0) if u else 0,
-                    },
-                    'retweet_count': (t.public_metrics or {}).get('retweet_count', 0),
-                    'favorite_count': (t.public_metrics or {}).get('like_count', 0),
-                    'url': f"https://twitter.com/{(u.username if u else 'unknown')}/status/{t.id}",
-                })
-            self.logger.info(f"Found {len(processed_tweets)} tweets for query: {query}")
-            return processed_tweets
-
-        except TooManyRequests as e:
-            self.logger.warning(f"Rate limit exceeded during search; continuing without waiting. {e}")
-            self.rate_limited = True
-            self._last_warnings["rate_limited"] = True
-            return []
-        except Forbidden as e:
-            self.logger.warning(f"Forbidden search query '{query}': {e}")
-            self._last_warnings["forbidden"] = True
-            return []
-        except Exception as e:
-            self.logger.error(f"Error searching tweets for query '{query}': {e}", exc_info=True)
-            return []
-
-    def monitor_accounts(self) -> List[Dict]:
-        """Monitor all configured Twitter accounts for TGE-related content."""
-        all_tweets: List[Dict] = []
-        for account in TWITTER_ACCOUNTS:
-            try:
-                tweets = self.fetch_user_tweets(account, count=20)
-                if tweets:
-                    all_tweets.extend(tweets)
-                # tiny pacing; set to 0 for max speed
-                time.sleep(0.2)
-            except Exception as e:
-                self.logger.error(f"Error monitoring account {account}: {e}", exc_info=True)
-                continue
-        return all_tweets
-
-    def search_tge_keywords(self) -> List[Dict]:
-        """Search for tweets containing TGE-related keywords."""
-        all_tweets: List[Dict] = []
-        search_queries: List[str] = []
-
-        # Companies x limited keywords to keep calls bounded
-        for company in COMPANIES[:10]:
-            for keyword in TGE_KEYWORDS[:5]:
-                query = f'"{company}" {keyword} -is:retweet lang:en'
-                search_queries.append(query)
-
-        # General TGE terms
-        general_queries = [
-            'TGE token generation event -is:retweet lang:en',
-            'crypto token launch -is:retweet lang:en',
-            'airdrop announcement -is:retweet lang:en',
-            'token sale ICO IDO -is:retweet lang:en',
-        ]
-        search_queries.extend(general_queries)
-
-        for query in search_queries:
-            try:
-                tweets = self.search_tweets(query, count=20)
-                if tweets:
-                    all_tweets.extend(tweets)
-                time.sleep(0.2)
-            except Exception as e:
-                self.logger.error(f"Error searching with query '{query}': {e}", exc_info=True)
-                continue
-
-        return all_tweets
-
-    def analyze_tweet_for_tge(self, tweet: Dict) -> Dict:
-        """Analyze a tweet for TGE-related content."""
-        text = tweet['text']
-
-        # Dedup by content
-        if is_content_duplicate(text, self.seen_content_hashes):
-            self.logger.debug(f"Duplicate content detected for tweet: {tweet['id']}")
-            return {
-                'tweet': tweet,
-                'mentioned_companies': [],
-                'found_keywords': [],
-                'relevance_score': 0.0,
-                'is_tge_related': False,
-                'analysis_timestamp': datetime.now(timezone.utc),
-                'is_duplicate': True,
-            }
-
-        text_lower = text.lower()
-        mentioned_companies = [c for c in COMPANIES if c.lower() in text_lower]
-        found_keywords = [k for k in TGE_KEYWORDS if k.lower() in text_lower]
-
-        keyword_weights = {
-            'tge': 0.5,
-            'token generation event': 0.5,
-            'token launch': 0.4,
-            'airdrop': 0.3,
-            'token sale': 0.25,
-            'ico': 0.25,
-            'ido': 0.25,
-            'token listing': 0.2,
-            'token distribution': 0.2,
-        }
-
-        relevance_score = calculate_relevance_score(
-            mentioned_companies, found_keywords, text,
-            keyword_weights=keyword_weights,
-            company_weight=0.4,
-        )
-
-        # Engagement boost
-        engagement_score = (
-            tweet.get('retweet_count', 0) * 0.001 +
-            tweet.get('favorite_count', 0) * 0.0005
-        )
-        relevance_score = min(relevance_score + min(engagement_score, 0.2), 1.0)
-
-        # Follower boost
-        followers = tweet.get('user', {}).get('followers_count', 0)
-        if followers > 100000:
-            relevance_score += 0.1
-        elif followers > 10000:
-            relevance_score += 0.05
-        relevance_score = min(relevance_score, 1.0)
-
-        is_tge_related = (
-            len(mentioned_companies) > 0 and
-            len(found_keywords) > 0 and
-            relevance_score > 0.3
-        )
-
-        return {
-            'tweet': tweet,
-            'mentioned_companies': mentioned_companies,
-            'found_keywords': found_keywords,
-            'relevance_score': relevance_score,
-            'is_tge_related': is_tge_related,
-            'analysis_timestamp': datetime.now(timezone.utc),
-            'is_duplicate': False,
-        }
+    # -------- public API expected by main.py --------
 
     def process_tweets(self) -> List[Dict]:
-        """Process all fetched tweets and identify TGE-related content."""
-        self.rate_limited = False
-        self._last_warnings = {"rate_limited": False, "forbidden": False, "disabled": False}
+        if not self.client:
+            return []
 
-        # Tweets from monitored accounts (non-blocking on RL)
-        account_tweets = self.monitor_accounts()
+        out: list[dict] = []
 
-        # Tweets from keyword searches (non-blocking on RL)
-        search_tweets = self.search_tge_keywords()
+        # 1) timelines
+        if self.accounts:
+            for handle in self.accounts:
+                try:
+                    u = _call_with_backoff(self.client.get_user, username=handle, user_fields=["id"])
+                except Exception as e:
+                    self.logger.warning(f"get_user({handle}) failed: {e}")
+                    continue
+                user = (u.data or None)
+                if not user:
+                    continue
+                uid = str(user.id)
+                out.extend(self._fetch_user_timeline(uid, handle))
+                time.sleep(0.4)  # gentle pacing
 
-        # Combine and deduplicate
-        all_tweets = account_tweets + search_tweets
-        unique_tweets = {tweet['id']: tweet for tweet in all_tweets}.values()
+        # 2) combined queries (company AND keyword)
+        if self.search_enabled:
+            out.extend(self._search_company_keyword_batches())
+        
+        # annotate as twitter and shape minimal fields downstream expects
+        for a in out:
+            a.setdefault("source", "Twitter")
+            a.setdefault("source_type", "twitter")
 
-        tge_tweets: List[Dict] = []
-        for tweet in unique_tweets:
-            if tweet['id'] in self.processed_tweets:
-                continue
-            self.processed_tweets.add(tweet['id'])
-
-            # Only process recent tweets (last 24 hours) — coerce to aware UTC first
-            created = _to_aware_utc(tweet.get('created_at'))
-            if not is_recent_content(created, hours=24):
-                continue
-
-            analysis = self.analyze_tweet_for_tge(tweet)
-            if analysis['is_tge_related'] and not analysis.get('is_duplicate', False):
-                tge_tweets.append(analysis)
-                self.logger.info(
-                    f"TGE-related tweet found: @{tweet['user']['screen_name']} - "
-                    f"{truncate_text(tweet['text'], 100)}... "
-                    f"(Companies: {analysis['mentioned_companies']}, "
-                    f"Score: {analysis['relevance_score']:.2f})"
-                )
-
-        self.tge_tweets.extend(tge_tweets)
-        self.save_state()
-
-        if self.rate_limited:
-            self.logger.warning("Twitter was rate-limited during this cycle; returning partial results.")
-
-        return tge_tweets
+        # stats
+        self.logger.info(f"process_tweets: produced {len(out)} candidate alerts")
+        return out
 
     def get_recent_tge_tweets(self, hours: int = 24) -> List[Dict]:
-        """Get TGE tweets from the last N hours."""
-        cutoff_time = datetime.now(timezone.utc) - timedelta(hours=hours)
-        return [
-            tweet for tweet in self.tge_tweets
-            if tweet['tweet'].get('created_at') and _to_aware_utc(tweet['tweet']['created_at']) > cutoff_time
-        ]
+        # Simple shim for daily summary; you can implement a cache if needed
+        return []
 
-    def format_tweet_alert(self, analysis: Dict) -> str:
-        """Format TGE tweet analysis into a readable alert."""
-        tweet = analysis['tweet']
-        ts = _to_aware_utc(tweet.get('created_at'))
-        ts_str = ts.strftime('%Y-%m-%d %H:%M UTC') if isinstance(ts, datetime) else str(ts)
-
-        alert = f"""
-🐦 TGE TWEET ALERT - @{tweet['user']['screen_name']}
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-👤 User: {tweet['user']['name']} (@{tweet['user']['screen_name']})
-👥 Followers: {tweet['user']['followers_count']:,}
-📅 Posted: {ts_str}
-🔗 Link: {tweet['url']}
-
-📊 Engagement: {tweet['retweet_count']} RTs, {tweet['favorite_count']} Likes
-
-🏢 Companies Mentioned: {', '.join(analysis['mentioned_companies']) if analysis['mentioned_companies'] else 'None'}
-🔑 TGE Keywords: {', '.join(analysis['found_keywords']) if analysis['found_keywords'] else 'None'}
-📊 Relevance Score: {analysis['relevance_score']:.2f}/1.0
-
-💬 Tweet:
-{tweet['text']}
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-        """
-        return alert.strip()
-
-    def get_stats(self) -> Dict[str, int]:
-        """Get statistics about processed tweets."""
+    def get_stats(self) -> Dict:
         return {
-            'total_processed': len(self.processed_tweets),
-            'total_tge_tweets': len(self.tge_tweets),
-            'recent_tge_tweets': len(self.get_recent_tge_tweets(24)),
-            'unique_content_hashes': len(self.seen_content_hashes),
+            "total_processed": 0,             # fill if you maintain counters
+            "total_tge_tweets": 0
         }
 
+    # -------- internals --------
 
-if __name__ == "__main__":
-    monitor = TwitterMonitor()
-    tge_tweets = monitor.process_tweets()
+    def _fetch_user_timeline(self, user_id: str, handle: str, max_results: int = 25) -> List[Dict]:
+        alerts: list[dict] = []
+        since_id = self._since.get(f"user:{user_id}")
+        try:
+            resp = _call_with_backoff(
+                self.client.get_users_tweets,
+                id=user_id,
+                since_id=since_id,
+                exclude=["retweets", "replies"],
+                max_results=max_results,
+                tweet_fields=["created_at", "text", "lang"]
+            )
+        except Exception as e:
+            self.logger.warning(f"fetch timeline @{handle} failed: {e}")
+            return alerts
 
-    print(f"Found {len(tge_tweets)} TGE-related tweets")
-    for analysis in tge_tweets:
-        print(monitor.format_tweet_alert(analysis))
-        print("\n" + "="*50 + "\n")
+        newest = since_id
+        data = resp.data or []
+        for t in data:
+            txt = t.text or ""
+            if not _matches_company_and_keyword(txt):
+                continue
+            url = f"https://x.com/{handle}/status/{t.id}"
+            alerts.append({
+                "title": f"@{handle}: possible TGE signal",
+                "text": txt,
+                "url": url,
+                "published": (t.created_at.isoformat() if getattr(t, "created_at", None) else None),
+                "author": handle,
+                "tweet_id": str(t.id),
+                "channel": "twitter",
+            })
+            if newest is None or int(t.id) > int(newest or 0):
+                newest = str(t.id)
+
+        if newest is not None:
+            self._since[f"user:{user_id}"] = str(newest)
+            _save_since_map(self._since)
+        return alerts
+
+    def _search_company_keyword_batches(self, per_query_limit: int = 25) -> List[Dict]:
+        """
+        Build queries like:
+          ("offchain labs" OR "arbitrum") ("token" OR "tge" OR "airdrop") lang:en -is:retweet
+        and page through a few until rate-limit is hit (backoff handles retries).
+        Track a simple since_id per query key.
+        """
+        alerts: list[dict] = []
+
+        # Build alias buckets for companies
+        company_buckets: list[list[str]] = []
+        for c in COMPANIES:
+            if isinstance(c, dict):
+                names = [c.get("name", "")] + (c.get("aliases", []) or [])
+            else:
+                names = [str(c)]
+            names = [n.strip() for n in names if n and n.strip()]
+            if names:
+                company_buckets.append(names)
+
+        if not company_buckets or not TGE_KEYWORDS:
+            return alerts
+
+        kw_clause = "(" + " OR ".join(f'"{k}"' if " " in k else k for k in TGE_KEYWORDS) + ")"
+        for names in company_buckets:
+            comp_clause = "(" + " OR ".join(f'"{n}"' if " " in n else n for n in names) + ")"
+            q = f"{comp_clause} {kw_clause} lang:en -is:retweet"
+
+            key = f"q:{comp_clause}|{kw_clause}"
+            since_id = self._since.get(key)
+
+            try:
+                resp = _call_with_backoff(
+                    self.client.search_recent_tweets,
+                    query=q,
+                    since_id=since_id,
+                    max_results=min(100, per_query_limit),
+                    tweet_fields=["created_at", "text", "lang"],
+                )
+            except TooManyRequests:
+                self.logger.warning("Rate limited during search; continuing with backoff")
+                continue
+            except Exception as e:
+                self.logger.warning(f"search_recent_tweets failed: {e}")
+                continue
+
+            newest = since_id
+            for t in resp.data or []:
+                txt = t.text or ""
+                if not _matches_company_and_keyword(txt):
+                    continue
+                url = f"https://x.com/i/web/status/{t.id}"
+                alerts.append({
+                    "title": "Twitter search hit: possible TGE",
+                    "text": txt,
+                    "url": url,
+                    "published": (t.created_at.isoformat() if getattr(t, "created_at", None) else None),
+                    "tweet_id": str(t.id),
+                    "channel": "twitter",
+                })
+                if newest is None or int(t.id) > int(newest or 0):
+                    newest = str(t.id)
+
+            if newest is not None:
+                self._since[key] = str(newest)
+                _save_since_map(self._since)
+            time.sleep(0.6)  # spacing between query groups
+
+        return alerts
