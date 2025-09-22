@@ -165,7 +165,6 @@ NEWS_SOURCES = [
     "https://cryptocurrencynews.com/feed/",
     "https://www.cryptoninjas.net/feed/",
     "https://blog.cex.io/feed",
-    "https://www.coinbackyard.com/feed/",
     "https://cryptoshrypto.com/feed/",
     "https://www.cryptonewsz.com/feed/",
     "https://coinchapter.com/feed/",

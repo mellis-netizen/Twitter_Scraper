@@ -17,11 +17,11 @@ import threading
 import traceback
 
 # Import our modules (run with PYTHONPATH=repository_root)
-from news_scraper import NewsScraper
-from email_notifier import EmailNotifier
-from twitter_monitor import TwitterMonitor
-from config import COMPANIES, NEWS_SOURCES, LOG_CONFIG, TGE_KEYWORDS
-from utils import (
+from .news_scraper import NewsScraper
+from .email_notifier import EmailNotifier
+from .twitter_monitor import TwitterMonitor
+from .config import COMPANIES, NEWS_SOURCES, LOG_CONFIG, TGE_KEYWORDS
+from .utils import (
     setup_structured_logging, HealthChecker, retry_on_failure,
     save_json_file, load_json_file
 )
