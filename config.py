@@ -176,7 +176,6 @@ NEWS_SOURCES = [
     "https://coincentral.com/news/feed/",
     "https://coinstats.app/blog/feed/",
     "https://coinpedia.org/feed/",
-    "https://coinsutra.com/blog/feed/",
     "https://cryptonews.com/news/feed/",
     "https://multicoin.capital/rss.xml",
     "https://cryptodaily.co.uk/feed",

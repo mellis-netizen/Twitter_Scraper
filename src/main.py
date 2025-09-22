@@ -16,15 +16,38 @@ import os, json, re, hashlib
 import threading
 import traceback
 
-# Import our modules (run with PYTHONPATH=repository_root)
-from .news_scraper import NewsScraper
-from .email_notifier import EmailNotifier
-from .twitter_monitor import TwitterMonitor
-from .config import COMPANIES, NEWS_SOURCES, LOG_CONFIG, TGE_KEYWORDS
-from .utils import (
+# Import our modules (run with PYTHONPATH=repository_root and "python -m src.main")
+from src.news_scraper import NewsScraper
+from src.email_notifier import EmailNotifier
+from src.twitter_monitor import TwitterMonitor
+from src.config import COMPANIES, NEWS_SOURCES, LOG_CONFIG, TGE_KEYWORDS
+from src.utils import (
     setup_structured_logging, HealthChecker, retry_on_failure,
     save_json_file, load_json_file
 )
+
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+
+# ----------------------------------------------------------------------
+# Run-with-timeout helper
+# ----------------------------------------------------------------------
+def run_with_timeout(fn, *args, timeout: float = 45.0, logger=None, **kwargs):
+    """
+    Run a function in a thread and enforce a hard timeout.
+    Returns (ok, result_or_exception). If ok=False and result is None -> timed out.
+    """
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(fn, *args, **kwargs)
+            return True, fut.result(timeout=timeout)
+    except FuturesTimeoutError:
+        if logger:
+            logger.warning(f"{getattr(fn, '__name__', 'call')} timed out after {timeout}s; skipping this cycle.")
+        return False, None
+    except Exception as e:
+        if logger:
+            logger.error(f"Error in {getattr(fn, '__name__', 'call')}: {e}", exc_info=True)
+        return False, e
 
 # ----------------------------------------------------------------------
 # De-dupe state: keep a set of seen alert keys on disk
@@ -116,31 +139,6 @@ def validate_config() -> dict:
     ok['email_config']     = True
     ok['twitter_config']   = True
     return ok
-
-# ----------------------------------------------------------------------
-# Option B: run a callable with a hard timeout
-# ----------------------------------------------------------------------
-def _run_with_timeout(fn, seconds: int, logger) -> list:
-    """
-    Run fn() in a thread; if it exceeds `seconds`, return [] and log a warning.
-    Any exception raised by fn() (within time) is propagated.
-    """
-    result: dict = {}
-    def _target():
-        try:
-            result["data"] = fn()
-        except Exception as e:
-            result["err"] = e
-
-    t = threading.Thread(target=_target, daemon=True)
-    t.start()
-    t.join(seconds)
-    if t.is_alive():
-        logger.warning("Twitter processing exceeded %s seconds; skipping this cycle.", seconds)
-        return []
-    if "err" in result:
-        raise result["err"]
-    return result.get("data", []) or []
 
 # ----------------------------------------------------------------------
 # Main monitor
@@ -307,7 +305,7 @@ class CryptoTGEMonitor:
                 self.error_count += 1
 
             # ----------------------
-            # Twitter (Option B: hard timeout)
+            # Twitter (hard timeout)
             # ----------------------
             try:
                 if os.getenv("DISABLE_TWITTER") == "1":
@@ -315,16 +313,24 @@ class CryptoTGEMonitor:
                     twitter_alerts = []
                 else:
                     self.logger.info("Processing Twitter content...")
-                    # Cap at 60 seconds; adjust as needed
-                    twitter_alerts = _run_with_timeout(
-                        lambda: self.twitter_monitor.process_tweets(),
-                        seconds=60,
+                    ok, tw_result = run_with_timeout(
+                        self.twitter_monitor.process_tweets,
+                        timeout=45.0,
                         logger=self.logger
                     )
-                    self.total_tweets_processed += len(twitter_alerts)
-                    self.logger.info(f"Twitter processing completed: {len(twitter_alerts)} alerts found")
-            except Exception as e:
-                self.logger.error(f"Error processing Twitter content: {str(e)}", exc_info=True)
+                    if ok and isinstance(tw_result, list):
+                        twitter_alerts = tw_result
+                        self.total_tweets_processed += len(twitter_alerts)
+                        self.logger.info(f"Twitter processing completed: {len(twitter_alerts)} alerts found")
+                    elif ok and tw_result is None:
+                        # Timed out
+                        self.logger.warning("Twitter processing timed out; continuing without Twitter results.")
+                    else:
+                        # Exception already logged inside run_with_timeout
+                        self.error_count += 1
+            except Exception:
+                # Extra belt-and-suspenders
+                self.logger.error("Unhandled exception during Twitter processing.", exc_info=True)
                 self.error_count += 1
 
             # ----------------------
@@ -334,9 +340,12 @@ class CryptoTGEMonitor:
             filtered_alerts, updated_seen = filter_and_dedupe(merged)
 
             def is_twitter(a: dict) -> bool:
-                if a.get("source_type") in {"twitter","tweet"}: return True
-                if a.get("channel") == "twitter": return True
-                if "tweet_id" in a or "user" in a or "author" in a: return True
+                if a.get("source_type") in {"twitter", "tweet"}:
+                    return True
+                if a.get("channel") == "twitter":
+                    return True
+                if "tweet_id" in a or "user" in a or "author" in a:
+                    return True
                 u = (a.get("url") or "").lower()
                 return "twitter.com" in u or "x.com" in u
 
@@ -393,8 +402,8 @@ class CryptoTGEMonitor:
 
     def setup_schedule(self):
         """Setup the monitoring schedule."""
-        schedule.every(30).minutes.do(self.run_monitoring_cycle)    # run every 30 minutes
-        schedule.every().day.at("09:00").do(self.send_daily_summary)  # daily 09:00 UTC
+        schedule.every(30).minutes.do(self.run_monitoring_cycle)      # run every 30 minutes
+        schedule.every().day.at("09:00").do(self.send_daily_summary) # daily 09:00 UTC
         self.logger.info("Schedule configured:")
         self.logger.info("- Monitoring cycle: Every 30 minutes")
         self.logger.info("- Daily summary: 9:00 AM UTC")
