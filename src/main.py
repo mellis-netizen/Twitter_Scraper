@@ -13,22 +13,24 @@ import sys
 from datetime import datetime
 from typing import List, Dict, Optional
 import os, json, re, hashlib
+import threading
+import traceback
 
-# Import our modules (script mode: run with PYTHONPATH=.)
-from .news_scraper import NewsScraper
+# Import our modules (run with PYTHONPATH=repository_root)
+from news_scraper import NewsScraper
 from email_notifier import EmailNotifier
 from twitter_monitor import TwitterMonitor
 from config import COMPANIES, NEWS_SOURCES, LOG_CONFIG, TGE_KEYWORDS
 from utils import (
     setup_structured_logging, HealthChecker, retry_on_failure,
+    save_json_file, load_json_file
 )
 
-# --------------------------------------------------------------------
-# De-dupe state
-# --------------------------------------------------------------------
+# ----------------------------------------------------------------------
+# De-dupe state: keep a set of seen alert keys on disk
+# ----------------------------------------------------------------------
 STATE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "state")
 SEEN_PATH = os.path.join(STATE_DIR, "seen.json")
-
 
 def _text_from_alert(alert: dict) -> str:
     parts = [
@@ -39,23 +41,20 @@ def _text_from_alert(alert: dict) -> str:
     ]
     return " ".join([p for p in parts if p]).strip()
 
-
 def matches_company_and_keyword(alert: dict) -> bool:
     """Require at least one company name AND one keyword in the same alert text."""
-    text = _text_from_alert(alert)
+    text = _text_from_alert(alert).lower()
     if not text:
         return False
 
     def _has(token: str) -> bool:
-        token = token.strip()
-        if not token:
-            return False
-        return re.search(rf"\b{re.escape(token)}\b", text, flags=re.IGNORECASE) is not None
+        token = re.escape(token.strip())
+        return re.search(rf"\b{token}\b", text, flags=re.IGNORECASE) is not None
 
     def _company_hit() -> bool:
         for c in COMPANIES:
             if isinstance(c, dict):
-                names = [c.get("name", "")] + (c.get("aliases", []) or [])
+                names = [c.get("name","")] + c.get("aliases", [])
             else:
                 names = [str(c)]
             if any(_has(n) for n in names if n):
@@ -67,7 +66,6 @@ def matches_company_and_keyword(alert: dict) -> bool:
 
     return _company_hit() and _keyword_hit()
 
-
 def alert_key(alert: dict) -> str:
     """
     Stable ID for de-dup: prefer URL; else title+source+date.
@@ -78,8 +76,7 @@ def alert_key(alert: dict) -> str:
     )
     return hashlib.sha1(basis.encode("utf-8", errors="ignore")).hexdigest()
 
-
-def load_seen() -> set:
+def load_seen() -> set[str]:
     try:
         os.makedirs(STATE_DIR, exist_ok=True)
         if os.path.isfile(SEEN_PATH):
@@ -89,19 +86,17 @@ def load_seen() -> set:
         pass
     return set()
 
-
-def save_seen(seen: set) -> None:
+def save_seen(seen: set[str]) -> None:
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = SEEN_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(sorted(seen), f, ensure_ascii=False, indent=2)
     os.replace(tmp, SEEN_PATH)
 
-
-def filter_and_dedupe(alerts: List[dict]) -> tuple[list[dict], set]:
+def filter_and_dedupe(alerts: list[dict]) -> tuple[list[dict], set[str]]:
     seen = load_seen()
-    out: list[dict] = []
-    for a in alerts or []:
+    out = []
+    for a in alerts:
         if not matches_company_and_keyword(a):
             continue
         k = alert_key(a)
@@ -111,12 +106,10 @@ def filter_and_dedupe(alerts: List[dict]) -> tuple[list[dict], set]:
         seen.add(k)
     return out, seen
 
-
+# ----------------------------------------------------------------------
+# Config validation
+# ----------------------------------------------------------------------
 def validate_config() -> dict:
-    """
-    Lightweight sanity checks so main() doesn't crash.
-    Email/Twitter are optional here; their modules can enforce deeper checks.
-    """
     ok = {}
     ok['companies_config'] = isinstance(COMPANIES, list) and len(COMPANIES) > 0
     ok['sources_config']   = isinstance(NEWS_SOURCES, list) and len(NEWS_SOURCES) > 0
@@ -124,7 +117,34 @@ def validate_config() -> dict:
     ok['twitter_config']   = True
     return ok
 
+# ----------------------------------------------------------------------
+# Option B: run a callable with a hard timeout
+# ----------------------------------------------------------------------
+def _run_with_timeout(fn, seconds: int, logger) -> list:
+    """
+    Run fn() in a thread; if it exceeds `seconds`, return [] and log a warning.
+    Any exception raised by fn() (within time) is propagated.
+    """
+    result: dict = {}
+    def _target():
+        try:
+            result["data"] = fn()
+        except Exception as e:
+            result["err"] = e
 
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(seconds)
+    if t.is_alive():
+        logger.warning("Twitter processing exceeded %s seconds; skipping this cycle.", seconds)
+        return []
+    if "err" in result:
+        raise result["err"]
+    return result.get("data", []) or []
+
+# ----------------------------------------------------------------------
+# Main monitor
+# ----------------------------------------------------------------------
 class CryptoTGEMonitor:
     """Main class that orchestrates the entire TGE monitoring system."""
 
@@ -142,7 +162,7 @@ class CryptoTGEMonitor:
 
         # State tracking
         self.running = True
-        self.last_run_time: Optional[datetime] = None
+        self.last_run_time = None
         self.total_news_processed = 0
         self.total_tweets_processed = 0
         self.total_alerts_sent = 0
@@ -158,8 +178,6 @@ class CryptoTGEMonitor:
 
         self.logger.info("Crypto TGE Monitor initialized successfully")
         self.logger.info(f"Monitoring {len(COMPANIES)} companies and {len(TGE_KEYWORDS)} TGE keywords")
-
-    # ---------- setup / housekeeping ----------
 
     def setup_logging(self):
         """Setup logging configuration and ensure log directory exists."""
@@ -204,7 +222,7 @@ class CryptoTGEMonitor:
 
         def check_twitter_monitor():
             try:
-                return True  # Twitter is optional
+                return True  # Twitter is optional; detailed checks inside module
             except Exception:
                 return False
 
@@ -240,10 +258,7 @@ class CryptoTGEMonitor:
             if os.path.exists(state_file):
                 with open(state_file, 'r') as f:
                     state = json.load(f)
-                    self.last_run_time = (
-                        datetime.fromisoformat(state.get('last_run_time', ''))
-                        if state.get('last_run_time') else None
-                    )
+                    self.last_run_time = datetime.fromisoformat(state.get('last_run_time', '')) if state.get('last_run_time') else None
                     self.total_news_processed = state.get('total_news_processed', 0)
                     self.total_tweets_processed = state.get('total_tweets_processed', 0)
                     self.total_alerts_sent = state.get('total_alerts_sent', 0)
@@ -267,8 +282,6 @@ class CryptoTGEMonitor:
         except Exception as e:
             self.logger.error(f"Failed to save application state: {str(e)}")
 
-    # ---------- main work ----------
-
     @retry_on_failure(max_retries=2, delay=30.0, exceptions=(Exception,))
     def run_monitoring_cycle(self):
         """Run a complete monitoring cycle."""
@@ -278,10 +291,12 @@ class CryptoTGEMonitor:
         self.logger.info(f"Starting monitoring cycle #{self.cycle_count}...")
 
         try:
-            news_alerts: list[dict] = []
-            twitter_alerts: list[dict] = []
+            news_alerts: List[dict] = []
+            twitter_alerts: List[dict] = []
 
-            # Process news articles with error handling
+            # ----------------------
+            # News
+            # ----------------------
             try:
                 self.logger.info("Processing news articles...")
                 news_alerts = self.news_scraper.process_articles()
@@ -291,35 +306,43 @@ class CryptoTGEMonitor:
                 self.logger.error(f"Error processing news articles: {str(e)}", exc_info=True)
                 self.error_count += 1
 
-            # Process Twitter content with error handling
+            # ----------------------
+            # Twitter (Option B: hard timeout)
+            # ----------------------
             try:
-                self.logger.info("Processing Twitter content...")
-                twitter_alerts = self.twitter_monitor.process_tweets()
-                self.total_tweets_processed += len(twitter_alerts)
-                self.logger.info(f"Twitter processing completed: {len(twitter_alerts)} alerts found")
+                if os.getenv("DISABLE_TWITTER") == "1":
+                    self.logger.info("Twitter disabled via DISABLE_TWITTER=1; skipping.")
+                    twitter_alerts = []
+                else:
+                    self.logger.info("Processing Twitter content...")
+                    # Cap at 60 seconds; adjust as needed
+                    twitter_alerts = _run_with_timeout(
+                        lambda: self.twitter_monitor.process_tweets(),
+                        seconds=60,
+                        logger=self.logger
+                    )
+                    self.total_tweets_processed += len(twitter_alerts)
+                    self.logger.info(f"Twitter processing completed: {len(twitter_alerts)} alerts found")
             except Exception as e:
                 self.logger.error(f"Error processing Twitter content: {str(e)}", exc_info=True)
                 self.error_count += 1
 
-            # Filtering + de-dup across both sources
+            # ----------------------
+            # Filter + de-dupe + email only if NEW relevant alerts
+            # ----------------------
             merged = (news_alerts or []) + (twitter_alerts or [])
             filtered_alerts, updated_seen = filter_and_dedupe(merged)
 
-            # Partition back into news vs twitter for the email template (best-effort)
             def is_twitter(a: dict) -> bool:
-                if a.get("source_type") in {"twitter", "tweet"}: 
-                    return True
-                if a.get("channel") == "twitter":
-                    return True
-                if "tweet_id" in a or "user" in a or "author" in a:
-                    return True
+                if a.get("source_type") in {"twitter","tweet"}: return True
+                if a.get("channel") == "twitter": return True
+                if "tweet_id" in a or "user" in a or "author" in a: return True
                 u = (a.get("url") or "").lower()
                 return "twitter.com" in u or "x.com" in u
 
             filtered_news    = [a for a in filtered_alerts if not is_twitter(a)]
             filtered_twitter = [a for a in filtered_alerts if is_twitter(a)]
 
-            # Send email only if something *new* and relevant was found
             if filtered_news or filtered_twitter:
                 self.logger.info(
                     f"Sending email alerts (filtered & deduped): "
@@ -355,8 +378,6 @@ class CryptoTGEMonitor:
             self.logger.error(f"Critical error in monitoring cycle: {str(e)}", exc_info=True)
             self.error_count += 1
             raise
-
-    # ---------- convenience tasks ----------
 
     def send_daily_summary(self):
         """Send daily summary email."""
@@ -456,7 +477,7 @@ class CryptoTGEMonitor:
             'companies_monitored': len(COMPANIES),
             'tge_keywords': len(TGE_KEYWORDS),
             'email_enabled': self.email_notifier.enabled,
-            'twitter_enabled': getattr(self.twitter_monitor, "api", None) is not None,
+            'twitter_enabled': self.twitter_monitor.api is not None if hasattr(self.twitter_monitor, "api") else True,
             'news_stats': news_stats,
             'twitter_stats': twitter_stats,
             'uptime': str(datetime.now() - self.last_run_time) if self.last_run_time else None

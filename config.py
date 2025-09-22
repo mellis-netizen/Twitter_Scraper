@@ -127,7 +127,6 @@ NEWS_SOURCES = [
     "https://coinidol.com/rss2/",
     "https://zebpay.com/feed",
     "https://coincheckup.com/blog/feed/",
-    "https://cryptoverze.com/feed/",
     "https://bitcoinethereumnews.com/feed/",
     "https://u.today/rss.php",
     "https://blockchain.news/rss",
@@ -141,7 +140,6 @@ NEWS_SOURCES = [
     "https://decrypt.co/feed",
     "https://moonwhale.io/feed/",
     "https://moralis.com/blog/feed/",
-    "https://bitemycoin.com/feed/",
     "https://cryptobullsclub.com/feed/",
     "https://robokoin.com/feed/",
     "https://www.cryptomaton.org/feed/",
@@ -171,16 +169,13 @@ NEWS_SOURCES = [
     "https://cryptoshrypto.com/feed/",
     "https://www.cryptonewsz.com/feed/",
     "https://coinchapter.com/feed/",
-    "https://coinfunda.com/feed/",
     "https://thecryptobasic.com/feed/",
     "https://webscrypto.com/feed/",
     "https://bitpinas.com/feed/",
-    "https://www.financemagnates.com/cryptocurrency/feed/",
     "https://cryptoexchange4u.com/feed/",
     "https://allincrypto.com/feed/",
     "https://coincentral.com/news/feed/",
     "https://coinstats.app/blog/feed/",
-    "https://www.crypto-news-flash.com/feed/",
     "https://coinpedia.org/feed/",
     "https://coinsutra.com/blog/feed/",
     "https://cryptonews.com/news/feed/",
@@ -193,7 +188,6 @@ NEWS_SOURCES = [
     "https://www.thecoinspost.com/feed/",
     "https://crypto.news/feed/",
     "https://cryptopotato.com/feed/",
-    "https://cryptoslate.com/feed/",
     "https://www.dlnews.com/arc/outboundfeeds/rss/",    
     # Network ecosystem blogs (major EVM L1/L2s)
     "https://blog.ethereum.org/en/feed.xml",
@@ -204,9 +198,6 @@ NEWS_SOURCES = [
     "https://medium.com/@telosfoundation",
     "https://blog.fantom.foundation/rss/",
     "https://blog.cronos.org/feed/",  # Cronos
-    "https://medium.com/feed/@harmonyprotocol",  # Harmony
-    "https://moonbeam.network/blog/feed/",  # Moonbeam/Moonriver
-    "https://medium.com/feed/@klaytn_official",  # Klaytn
     "https://medium.com/feed/@CeloOrg",  # Celo
     "https://medium.com/feed/@AstarNetwork",  # Astar
 ]
