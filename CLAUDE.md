@@ -56,7 +56,7 @@ python -c "import requests, feedparser, schedule, tweepy, psutil; print('All dep
 
 **Main Application (`src/main.py`)**
 - Orchestrates the entire system using the `CryptoTGEMonitor` class
-- Manages scheduling (every 30 minutes), error handling, and graceful shutdown
+- Manages scheduling (once daily at 9 AM UTC), error handling, and graceful shutdown
 - Implements circuit breakers and watchdog mechanisms for reliability
 - Handles deduplication using persistent state in `state/seen.json`
 - Provides comprehensive health monitoring and metrics tracking
@@ -195,7 +195,7 @@ When modifying the system:
 ## Production Deployment
 
 The system is designed for 24/7 operation:
-- Scheduled monitoring every 30 minutes
+- Scheduled monitoring once daily at 9 AM UTC
 - Daily summary emails at 9 AM PST
 - Graceful shutdown handling (SIGTERM/SIGINT)
 - Automatic log rotation

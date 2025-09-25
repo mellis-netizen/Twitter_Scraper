@@ -602,11 +602,11 @@ class CryptoTGEMonitor:
 
     def setup_schedule(self):
         """Setup the monitoring schedule."""
-        schedule.every(30).minutes.do(self.run_monitoring_cycle)      # run every 30 minutes
+        schedule.every().day.at("09:00").do(self.run_monitoring_cycle)  # run once daily at 9 AM UTC
         # Schedule daily summary at 9:00 AM PST (17:00 UTC)
         schedule.every().day.at("17:00").do(self.send_daily_summary)
         self.logger.info("Schedule configured:")
-        self.logger.info("- Monitoring cycle: Every 30 minutes")
+        self.logger.info("- Monitoring cycle: Once daily at 9:00 AM UTC")
         self.logger.info("- Daily summary: 9:00 AM PST (17:00 UTC)")
 
     def run_once(self):

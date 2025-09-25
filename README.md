@@ -199,7 +199,7 @@ The system monitors 19 companies including:
 ## 🎯 Monitoring Modes
 
 - **`once`**: Single monitoring cycle (good for testing)
-- **`continuous`**: Runs every 30 minutes (production mode)
+- **`continuous`**: Runs once daily at 9 AM UTC (production mode)
 - **`test`**: Tests all components individually
 - **`status`**: Shows current system health and statistics
 
