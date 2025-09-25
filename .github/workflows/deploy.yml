@@ -18,14 +18,16 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Setup SSH Key
+      run: |
+        mkdir -p ~/.ssh
+        echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+        chmod 600 ~/.ssh/id_rsa
+        ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
     - name: Deploy to EC2
-      uses: appleboy/ssh-action@v1.0.3
-      with:
-        host: ${{ secrets.EC2_HOST }}
-        username: ${{ secrets.EC2_USERNAME }}
-        key: ${{ secrets.EC2_SSH_KEY }}
-        port: 22
-        script: |
+      run: |
+        ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} << 'EOF'
           set -e
 
           # Colors for output
@@ -55,36 +57,36 @@ jobs:
 
           # Create backup
           log "Creating backup of current deployment..."
-          if [ -d "${{ env.DEPLOY_PATH }}/current" ]; then
-              sudo mv ${{ env.DEPLOY_PATH }}/current ${{ env.DEPLOY_PATH }}/backup-$(date +%Y%m%d_%H%M%S)
+          if [ -d "/opt/crypto-tge-monitor/current" ]; then
+              sudo mv /opt/crypto-tge-monitor/current /opt/crypto-tge-monitor/backup-$(date +%Y%m%d_%H%M%S)
           fi
 
           # Clone/update repository
           log "Pulling latest code from GitHub..."
-          if [ -d "${{ env.DEPLOY_PATH }}/repo" ]; then
-              cd ${{ env.DEPLOY_PATH }}/repo
+          if [ -d "/opt/crypto-tge-monitor/repo" ]; then
+              cd /opt/crypto-tge-monitor/repo
               sudo git fetch origin
               sudo git reset --hard origin/main
               sudo git clean -fd
           else
-              sudo git clone https://github.com/${{ github.repository }}.git ${{ env.DEPLOY_PATH }}/repo
-              cd ${{ env.DEPLOY_PATH }}/repo
+              sudo git clone https://github.com/${{ github.repository }}.git /opt/crypto-tge-monitor/repo
+              cd /opt/crypto-tge-monitor/repo
           fi
 
           # Deploy new code
           log "Deploying new application code..."
-          sudo mkdir -p ${{ env.DEPLOY_PATH }}/current
-          sudo cp -r src/ ${{ env.DEPLOY_PATH }}/current/
-          sudo cp config.py ${{ env.DEPLOY_PATH }}/current/
-          sudo cp requirements.txt ${{ env.DEPLOY_PATH }}/current/
-          sudo cp CLAUDE.md ${{ env.DEPLOY_PATH }}/current/
+          sudo mkdir -p /opt/crypto-tge-monitor/current
+          sudo cp -r src/ /opt/crypto-tge-monitor/current/
+          sudo cp config.py /opt/crypto-tge-monitor/current/
+          sudo cp requirements.txt /opt/crypto-tge-monitor/current/
+          sudo cp CLAUDE.md /opt/crypto-tge-monitor/current/
 
           # Update dependencies
           log "Updating Python dependencies..."
-          sudo -u crypto-tge-monitor ${{ env.DEPLOY_PATH }}/venv/bin/pip install -r ${{ env.DEPLOY_PATH }}/current/requirements.txt
+          sudo -u crypto-tge-monitor /opt/crypto-tge-monitor/venv/bin/pip install -r /opt/crypto-tge-monitor/current/requirements.txt
 
           # Set proper ownership
-          sudo chown -R crypto-tge-monitor:crypto-tge-monitor ${{ env.DEPLOY_PATH }}/current
+          sudo chown -R crypto-tge-monitor:crypto-tge-monitor /opt/crypto-tge-monitor/current
 
           # Start the service
           log "Starting crypto-tge-monitor service..."
@@ -100,6 +102,7 @@ jobs:
           fi
 
           log "🚀 Deployment completed successfully!"
+        EOF
 
     - name: Notify on success
       if: success()
