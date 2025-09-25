@@ -53,21 +53,44 @@ class EmailNotifier:
         
         return header.strip()
 
-    def _sanitize_content(self, content: str) -> str:
+    def _sanitize_content(self, content: str, escape_html: bool = True) -> str:
         """Sanitize email content."""
         if not content or not isinstance(content, str):
             return ""
-        
-        # Remove null bytes and control characters, escape HTML entities
-        import html
+
+        # Remove null bytes and control characters
         content = ''.join(char for char in content if ord(char) >= 32 or char in '\t\n\r')
-        content = html.escape(content)
-        
+
+        # Only escape HTML if requested (for plain text content, not HTML structure)
+        if escape_html:
+            import html
+            content = html.escape(content)
+
         # Limit content size to prevent memory issues
         if len(content) > 1024 * 1024:  # 1MB limit
             content = content[:1024 * 1024]
-        
+
         return content
+
+    def _clean_summary(self, summary: str) -> str:
+        """Clean up article summary for email display."""
+        if not summary:
+            return "No summary available"
+
+        # Remove HTML tags that might be in RSS content
+        import re
+        summary = re.sub(r'<[^>]+>', '', summary)
+
+        # Clean up common RSS artifacts
+        summary = summary.replace('&lt;', '<').replace('&gt;', '>').replace('&amp;', '&')
+        summary = re.sub(r'The post.*?appeared on.*$', '', summary)
+        summary = re.sub(r'^\s*TLDR\s*', '', summary)
+
+        # Truncate and add ellipsis if needed
+        if len(summary) > 300:
+            summary = summary[:300].rsplit(' ', 1)[0] + '...'
+
+        return self._sanitize_content(summary.strip())
 
     def _validate_email_config(self) -> bool:
         """Validate email configuration."""
@@ -121,9 +144,10 @@ class EmailNotifier:
 
         # Sanitize inputs to prevent header injection
         subject = self._sanitize_header(subject)
-        html = self._sanitize_content(html)
+        # Don't escape HTML in the main HTML content (it's already properly formatted)
+        html = self._sanitize_content(html, escape_html=False)
         if text:
-            text = self._sanitize_content(text)
+            text = self._sanitize_content(text, escape_html=True)
 
         # Build MIME message (HTML + optional plain text)
         msg = MIMEMultipart('alternative')
@@ -366,38 +390,147 @@ class EmailNotifier:
             <meta charset="UTF-8">
             <style>
                 body {{
-                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
                     line-height: 1.6;
-                    color: #333;
+                    color: #2c3e50;
                     max-width: 800px;
                     margin: 0 auto;
                     padding: 20px;
-                    background-color: #f5f5f5;
+                    background-color: #f8f9fa;
                 }}
                 .container {{
                     background-color: white;
-                    border-radius: 10px;
+                    border-radius: 12px;
                     padding: 30px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                    box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+                    border: 1px solid #e9ecef;
                 }}
-                .header {{ text-align: center; border-bottom: 3px solid #007bff; padding-bottom: 20px; margin-bottom: 20px; }}
-                .alert-section {{ margin-bottom: 30px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }}
-                .alert-header {{ background-color: #007bff; color: white; padding: 12px 16px; font-weight: bold; font-size: 16px; }}
-                .alert-content {{ padding: 16px; }}
-                .alert-item {{ border-bottom: 1px solid #f0f0f0; padding: 14px 0; }}
+                .header {{
+                    text-align: center;
+                    border-bottom: 2px solid #007bff;
+                    padding-bottom: 25px;
+                    margin-bottom: 30px;
+                }}
+                .header h1 {{
+                    color: #007bff;
+                    margin: 0 0 10px 0;
+                    font-size: 28px;
+                    font-weight: 700;
+                }}
+                .header p {{
+                    margin: 5px 0;
+                    color: #6c757d;
+                }}
+                .alert-section {{
+                    margin-bottom: 35px;
+                    border: 1px solid #dee2e6;
+                    border-radius: 10px;
+                    overflow: hidden;
+                    box-shadow: 0 2px 8px rgba(0,0,0,0.04);
+                }}
+                .alert-header {{
+                    background: linear-gradient(135deg, #007bff 0%, #0056b3 100%);
+                    color: white;
+                    padding: 15px 20px;
+                    font-weight: 700;
+                    font-size: 16px;
+                }}
+                .alert-content {{ padding: 20px; }}
+                .alert-item {{
+                    border-bottom: 1px solid #f1f3f4;
+                    padding: 20px 0;
+                    transition: background-color 0.2s ease;
+                }}
                 .alert-item:last-child {{ border-bottom: none; }}
-                .alert-title {{ font-size: 15px; font-weight: 600; color: #007bff; margin-bottom: 6px; }}
-                .alert-meta {{ font-size: 13px; color: #666; margin-bottom: 8px; }}
-                .companies, .keywords, .score {{
-                    padding: 6px 10px; border-radius: 5px; margin: 3px 4px 0 0; display: inline-block;
+                .alert-item:hover {{ background-color: #f8f9fa; }}
+                .alert-title {{
+                    font-size: 16px;
+                    font-weight: 600;
+                    color: #1a365d;
+                    margin-bottom: 8px;
+                    line-height: 1.4;
                 }}
-                .companies {{ background-color: #e8f4fd; }}
-                .keywords  {{ background-color: #fff3cd; }}
-                .score     {{ background-color: #d4edda; font-weight: 600; }}
-                .tweet-content {{ background:#f8f9fa; padding: 12px; border-radius: 5px; border-left: 4px solid #007bff; margin: 8px 0; font-style: italic; }}
-                .footer {{ text-align: center; margin-top: 20px; padding-top: 12px; border-top: 1px solid #e0e0e0; color: #666; font-size: 12px; }}
-                .link {{ color: #007bff; text-decoration: none; }}
-                .link:hover {{ text-decoration: underline; }}
+                .alert-meta {{
+                    font-size: 13px;
+                    color: #718096;
+                    margin-bottom: 12px;
+                }}
+                .companies, .keywords, .score {{
+                    padding: 6px 12px;
+                    border-radius: 6px;
+                    margin: 4px 6px 4px 0;
+                    display: inline-block;
+                    font-size: 12px;
+                    font-weight: 500;
+                }}
+                .companies {{
+                    background-color: #e3f2fd;
+                    color: #1565c0;
+                    border: 1px solid #bbdefb;
+                }}
+                .keywords {{
+                    background-color: #fff8e1;
+                    color: #ef6c00;
+                    border: 1px solid #ffcc02;
+                }}
+                .score {{
+                    background-color: #e8f5e8;
+                    color: #2e7d32;
+                    border: 1px solid #c8e6c9;
+                    font-weight: 600;
+                }}
+                .tweet-content {{
+                    background: #f8f9fa;
+                    padding: 16px;
+                    border-radius: 8px;
+                    border-left: 4px solid #007bff;
+                    margin: 12px 0;
+                    font-style: italic;
+                    color: #495057;
+                }}
+                .summary-content {{
+                    background-color: #f8f9fa;
+                    padding: 16px;
+                    border-radius: 8px;
+                    border-left: 4px solid #28a745;
+                    font-size: 14px;
+                    color: #495057;
+                    line-height: 1.5;
+                }}
+                .footer {{
+                    text-align: center;
+                    margin-top: 30px;
+                    padding-top: 20px;
+                    border-top: 2px solid #e9ecef;
+                    color: #6c757d;
+                    font-size: 13px;
+                }}
+                .link {{
+                    color: #007bff;
+                    text-decoration: none;
+                    font-weight: 500;
+                    padding: 8px 16px;
+                    background-color: #f8f9fa;
+                    border: 1px solid #dee2e6;
+                    border-radius: 6px;
+                    display: inline-block;
+                    margin: 8px 0;
+                    transition: all 0.2s ease;
+                }}
+                .link:hover {{
+                    background-color: #007bff;
+                    color: white;
+                    text-decoration: none;
+                }}
+                @media only screen and (max-width: 600px) {{
+                    body {{ padding: 10px; }}
+                    .container {{ padding: 20px; }}
+                    .alert-content {{ padding: 15px; }}
+                    .companies, .keywords, .score {{
+                        display: block;
+                        margin: 4px 0;
+                    }}
+                }}
             </style>
         </head>
         <body>
@@ -445,8 +578,8 @@ class EmailNotifier:
                             </div>
                             <div><a href="{art.get('link') or '#'}" class="link" target="_blank">Read Full Article →</a></div>
                             <div style="margin-top: 8px;">{comps}{keys}{score}</div>
-                            <div style="margin-top: 8px; font-size: 14px; color: #666;">
-                                {self._sanitize_content((art.get('summary') or 'No summary available')[:200])}...
+                            <div class="summary-content" style="margin-top: 12px;">
+                                {self._clean_summary(art.get('summary') or '')}
                             </div>
                         </div>
                 """
