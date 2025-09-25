@@ -50,9 +50,13 @@ jobs:
 
           log "Starting automated deployment from GitHub..."
 
-          # Stop the service
-          log "Stopping crypto-tge-monitor service..."
-          sudo systemctl stop crypto-tge-monitor || true
+          # Check if service exists and is running
+          if sudo systemctl list-units --full -all | grep -q "crypto-tge-monitor.service"; then
+              log "Stopping crypto-tge-monitor service..."
+              sudo systemctl stop crypto-tge-monitor || true
+          else
+              warn "Service not found - this might be the first deployment"
+          fi
 
           # Create backup
           log "Creating backup of current deployment..."
@@ -80,16 +84,25 @@ jobs:
           sudo cp requirements.txt /opt/crypto-tge-monitor/current/
           sudo cp CLAUDE.md /opt/crypto-tge-monitor/current/
 
-          # Update dependencies
-          log "Updating Python dependencies..."
-          sudo -u crypto-tge-monitor /opt/crypto-tge-monitor/venv/bin/pip install -r /opt/crypto-tge-monitor/current/requirements.txt
+          # Update dependencies if virtual environment exists
+          if [ -d "/opt/crypto-tge-monitor/venv" ]; then
+              log "Updating Python dependencies..."
+              sudo -u crypto-tge-monitor /opt/crypto-tge-monitor/venv/bin/pip install -r /opt/crypto-tge-monitor/current/requirements.txt
+          else
+              warn "Virtual environment not found - run initial deployment first"
+              exit 1
+          fi
 
           # Set proper ownership
           sudo chown -R crypto-tge-monitor:crypto-tge-monitor /opt/crypto-tge-monitor/current
 
           # Start the service
           log "Starting crypto-tge-monitor service..."
-          sudo systemctl start crypto-tge-monitor
+          if sudo systemctl list-units --full -all | grep -q "crypto-tge-monitor.service"; then
+              sudo systemctl start crypto-tge-monitor
+          else
+              error "Service not installed - run initial deployment script first"
+          fi
 
           # Wait and check status
           sleep 10

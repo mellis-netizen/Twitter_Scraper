@@ -9,7 +9,7 @@ set -e
 APP_NAME="crypto-tge-monitor"
 APP_DIR="/opt/$APP_NAME"
 SERVICE_NAME="crypto-tge-monitor"
-REPO_URL="https://github.com/YOUR_USERNAME/YOUR_REPO.git"  # Update this
+REPO_URL="https://github.com/mellis-netizen/Twitter_Scraper.git"
 
 # Colors
 GREEN='\033[0;32m'
