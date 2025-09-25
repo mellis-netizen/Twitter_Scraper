@@ -11,7 +11,7 @@ APP_DIR="/opt/$APP_NAME"
 SERVICE_NAME="crypto-tge-monitor"
 LOG_DIR="/var/log/$APP_NAME"
 STATE_DIR="/var/lib/$APP_NAME"
-PYTHON_VERSION="3.11"
+PYTHON_VERSION="3.10"
 
 # Colors for output
 RED='\033[0;31m'
@@ -48,8 +48,29 @@ install_system_deps() {
     # Update package list
     apt-get update -q
 
+    # Detect available Python version
+    if command -v python3.11 &> /dev/null; then
+        PYTHON_VERSION="3.11"
+    elif command -v python3.10 &> /dev/null; then
+        PYTHON_VERSION="3.10"
+    elif command -v python3.9 &> /dev/null; then
+        PYTHON_VERSION="3.9"
+    else
+        PYTHON_VERSION="3"
+    fi
+
+    log "Using Python version: $PYTHON_VERSION"
+
     # Install Python and pip
-    apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-venv
+    if [ "$PYTHON_VERSION" = "3" ]; then
+        apt-get install -y python3 python3-pip python3-venv
+    else
+        apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-pip python${PYTHON_VERSION}-venv || {
+            log "Specific Python version not available, falling back to python3"
+            apt-get install -y python3 python3-pip python3-venv
+            PYTHON_VERSION="3"
+        }
+    fi
 
     # Install git for deployment
     apt-get install -y git
