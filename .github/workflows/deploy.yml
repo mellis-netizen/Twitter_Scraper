@@ -3,7 +3,7 @@ name: Deploy to EC2
 on:
   push:
     branches: [ main, master ]
-  workflow_dispatch:  # Allow manual triggering
+  workflow_dispatch:
 
 env:
   APP_NAME: crypto-tge-monitor
@@ -18,37 +18,15 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Setup SSH Key
-      run: |
-        mkdir -p ~/.ssh
-
-        # Create key file with proper formatting
-        cat << 'KEY_EOF' > ~/.ssh/id_rsa
-        ${{ secrets.EC2_SSH_KEY }}
-        KEY_EOF
-
-        # Fix permissions and format
-        chmod 600 ~/.ssh/id_rsa
-
-        # Remove any carriage returns and ensure proper line endings
-        sed -i 's/\r$//' ~/.ssh/id_rsa
-
-        # Add known hosts
-        ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
-
-        # Debug output
-        echo "=== SSH Key Debug ==="
-        echo "Key file size: $(wc -c < ~/.ssh/id_rsa) bytes"
-        echo "Key starts with: $(head -1 ~/.ssh/id_rsa)"
-        echo "Key ends with: $(tail -1 ~/.ssh/id_rsa)"
-        echo "Key line count: $(wc -l < ~/.ssh/id_rsa)"
-
-        # Test key format
-        ssh-keygen -l -f ~/.ssh/id_rsa || echo "Key format validation failed"
-
-    - name: Deploy to EC2
-      run: |
-        ssh -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa ${{ secrets.EC2_USERNAME }}@${{ secrets.EC2_HOST }} << 'EOF'
+    - name: Deploy via SSH
+      uses: appleboy/ssh-action@master
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        port: 22
+        timeout: 300s
+        script: |
           set -e
 
           # Colors for output
@@ -123,7 +101,6 @@ jobs:
           fi
 
           log "🚀 Deployment completed successfully!"
-        EOF
 
     - name: Notify on success
       if: success()
