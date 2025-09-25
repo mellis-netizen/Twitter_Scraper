@@ -115,58 +115,56 @@ def validate_config() -> Dict[str, bool]:
     
     return validation_results
 
-# Companies to monitor (with aliases for better matching)
+# Companies to monitor (with aliases and token symbols for precise matching)
 COMPANIES = [
-    {"name": "Corn", "aliases": ["Corn Protocol", "Corn Finance"]},
-    {"name": "Corn2", "aliases": ["Corn2 Protocol"]}, 
-    {"name": "Curvance", "aliases": ["Curvance Finance", "Curvance Protocol"]},
-    {"name": "Darkbright", "aliases": ["Darkbright Labs", "Darkbright Protocol"]},
-    {"name": "Fabric", "aliases": ["Fabric Protocol", "Fabric Labs"]},
-    {"name": "Caldera", "aliases": ["Caldera Labs", "Caldera Protocol"]},
-    {"name": "Open Eden", "aliases": ["OpenEden", "Open Eden Protocol"]},
-    {"name": "XAI", "aliases": ["XAI Games", "Xai", "Xai Games"]},
-    {"name": "Espresso", "aliases": ["Espresso Systems", "Espresso Labs"]},
-    {"name": "2046 Angels Ltd", "aliases": ["2046 Angels", "2046"]},
-    {"name": "Clique", "aliases": ["Clique Protocol", "Clique Labs"]},
-    {"name": "TreasureDAO", "aliases": ["Treasure DAO", "Treasure", "Treasure Protocol"]},
-    {"name": "Camelot", "aliases": ["Camelot DEX", "Camelot Protocol"]},
-    {"name": "DuckChain", "aliases": ["Duck Chain", "DuckChain Protocol"]},
-    {"name": "Spacecoin", "aliases": ["Space Coin", "Spacecoin Protocol"]},
-    {"name": "FhenixToken", "aliases": ["Fhenix", "Fhenix Token", "Fhenix Protocol"]},
-    {"name": "USD.ai", "aliases": ["USDai", "USD AI", "USD.ai Protocol"]},
-    {"name": "Huddle01", "aliases": ["Huddle 01", "Huddle01 Protocol"]},
-    {"name": "Succinct", "aliases": ["Succinct Labs", "Succinct Protocol"]}
+    {"name": "Corn", "aliases": ["Corn Protocol", "Corn Finance"], "tokens": ["CORN"], "exclusions": ["popcorn", "corn futures", "corn price"]},
+    {"name": "Curvance", "aliases": ["Curvance Finance", "Curvance Protocol"], "tokens": ["CRV", "CURV"], "exclusions": []},
+    {"name": "Darkbright", "aliases": ["Darkbright Labs", "Darkbright Protocol"], "tokens": [], "exclusions": []},
+    {"name": "Fabric", "aliases": ["Fabric Protocol", "Fabric Labs", "Fabric Cryptography"], "tokens": ["FAB"], "exclusions": ["fabric softener", "textile fabric", "fabric store"]},
+    {"name": "Caldera", "aliases": ["Caldera Labs", "Caldera Protocol", "Caldera Chain"], "tokens": ["CAL"], "exclusions": ["volcanic caldera", "yellowstone caldera"]},
+    {"name": "Open Eden", "aliases": ["OpenEden", "Open Eden Protocol"], "tokens": ["TBILL"], "exclusions": []},
+    {"name": "XAI", "aliases": ["XAI Games", "Xai", "Xai Games"], "tokens": ["XAI"], "exclusions": ["explainable ai", "xai technology"]},
+    {"name": "Espresso", "aliases": ["Espresso Systems", "Espresso Labs"], "tokens": ["ESPR"], "exclusions": ["coffee", "espresso machine", "starbucks"]},
+    {"name": "Clique", "aliases": ["Clique Protocol", "Clique Labs"], "tokens": ["CLI"], "exclusions": ["social clique", "clique theory"]},
+    {"name": "TreasureDAO", "aliases": ["Treasure DAO", "Treasure", "Treasure Protocol"], "tokens": ["MAGIC"], "exclusions": ["treasure hunt", "national treasure"]},
+    {"name": "Camelot", "aliases": ["Camelot DEX", "Camelot Protocol"], "tokens": ["GRAIL"], "exclusions": ["king arthur", "camelot movie"]},
+    {"name": "DuckChain", "aliases": ["Duck Chain", "DuckChain Protocol"], "tokens": ["DUCK"], "exclusions": ["rubber duck", "donald duck"]},
+    {"name": "Spacecoin", "aliases": ["Space Coin", "Spacecoin Protocol"], "tokens": ["SPACE"], "exclusions": ["nasa", "space exploration"]},
+    {"name": "Fhenix", "aliases": ["Fhenix Token", "Fhenix Protocol"], "tokens": ["FHE"], "exclusions": []},
+    {"name": "USD.ai", "aliases": ["USDai", "USD AI", "USD.ai Protocol"], "tokens": ["USDAI"], "exclusions": []},
+    {"name": "Huddle01", "aliases": ["Huddle 01", "Huddle01 Protocol"], "tokens": ["HUD"], "exclusions": ["football huddle", "team huddle"]},
+    {"name": "Succinct", "aliases": ["Succinct Labs", "Succinct Protocol"], "tokens": ["SUC"], "exclusions": ["succinct definition", "succinct writing"]}
 ]
 
-# TGE-related keywords (comprehensive list)
-TGE_KEYWORDS = [
-    # Core TGE terms
+# TGE-related keywords - categorized by confidence level
+# High confidence keywords (strong TGE indicators)
+HIGH_CONFIDENCE_TGE_KEYWORDS = [
     "TGE", "token generation event", "token launch", "token release",
     "token distribution", "airdrop", "token sale", "ICO", "IDO",
     "token listing", "token launch date", "token generation",
-    "token deployment", "token minting", "token creation",
-    
-    # Additional TGE indicators
-    "token launch", "token goes live", "token live", "token trading",
-    "token launchpad", "token presale", "token public sale",
-    "token vesting", "token unlock", "token emission",
-    "token supply", "token economics", "tokenomics",
-    "governance token", "utility token", "security token",
-    "token swap", "token migration", "token bridge",
-    "token staking", "token farming", "token rewards",
-    
-    # Launch-related terms
-    "mainnet launch", "mainnet release", "mainnet deployment",
-    "testnet to mainnet", "beta to mainnet", "alpha to mainnet",
-    "protocol launch", "network launch", "chain launch",
-    "ecosystem launch", "platform launch", "dapp launch",
-    
-    # Announcement terms
-    "announce", "announced", "announcing", "announcement",
-    "launching", "releasing", "deploying", "going live",
-    "coming soon", "launch date", "release date", "go live",
-    "live on", "available on", "trading on", "listed on"
+    "token deployment", "token goes live", "token trading launch",
+    "token presale", "token public sale", "governance token launch",
+    "utility token launch", "mainnet token launch"
 ]
+
+# Medium confidence keywords (require company context)
+MEDIUM_CONFIDENCE_TGE_KEYWORDS = [
+    "mainnet launch", "mainnet release", "mainnet deployment",
+    "protocol launch", "network launch", "platform launch",
+    "token minting", "token creation", "token unlock",
+    "token emission", "tokenomics", "token economics",
+    "launching", "going live", "live on mainnet"
+]
+
+# Low confidence keywords (require company + multiple indicators)
+LOW_CONFIDENCE_TGE_KEYWORDS = [
+    "announce", "announced", "announcing", "announcement",
+    "releasing", "deploying", "coming soon", "launch date",
+    "release date", "go live", "available on", "trading on", "listed on"
+]
+
+# Combined list for backward compatibility
+TGE_KEYWORDS = HIGH_CONFIDENCE_TGE_KEYWORDS + MEDIUM_CONFIDENCE_TGE_KEYWORDS + LOW_CONFIDENCE_TGE_KEYWORDS
 
 # Crypto news sources (EVM-focused; removed bitcoin-only outlets)
 NEWS_SOURCES = [

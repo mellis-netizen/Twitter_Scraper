@@ -10,7 +10,7 @@ from urllib.parse import quote_plus
 import tweepy
 from tweepy.errors import TooManyRequests, HTTPException
 
-from config import COMPANIES, TGE_KEYWORDS
+from config import COMPANIES, TGE_KEYWORDS, HIGH_CONFIDENCE_TGE_KEYWORDS, MEDIUM_CONFIDENCE_TGE_KEYWORDS
 
 # ------------------ persistent since_id per user/search ------------------
 
@@ -48,57 +48,89 @@ def _has_token(text: str, token: str) -> bool:
 
 def _matches_company_and_keyword(text: str) -> bool:
     """
-    Use the same sophisticated matching logic as main.py
+    Enhanced Twitter matching logic - same as main.py but adapted for tweets
     """
-    if not text:
+    if not text or len(text.strip()) < 10:
         return False
 
-    text_lower = text.lower()
+    text = text.lower()
 
     def _has(token: str) -> bool:
+        """Check if token exists as whole word"""
+        if not token.strip():
+            return False
         token = re.escape(token.strip())
-        return re.search(rf"\b{token}\b", text_lower, flags=re.IGNORECASE) is not None
+        return re.search(rf"\b{token}\b", text, flags=re.IGNORECASE) is not None
 
-    def _company_hit() -> bool:
+    def _find_company_matches() -> list:
+        """Find all matching companies and return match details"""
+        matches = []
         for c in COMPANIES:
-            if isinstance(c, dict):
-                names = [c.get("name","")] + c.get("aliases", [])
-            else:
-                names = [str(c)]
-            if any(_has(n) for n in names if n):
-                return True
+            if not isinstance(c, dict):
+                continue
+
+            company_name = c.get("name", "")
+            aliases = c.get("aliases", [])
+            tokens = c.get("tokens", [])
+            exclusions = c.get("exclusions", [])
+
+            # Check for exclusion words first
+            if any(_has(excl) for excl in exclusions):
+                continue
+
+            # Check company name and aliases
+            all_names = [company_name] + aliases
+            name_match = any(_has(name) for name in all_names if name)
+
+            # Check token symbols
+            token_match = any(_has(token) for token in tokens)
+
+            if name_match or token_match:
+                matches.append({
+                    'company': c,
+                    'name_match': name_match,
+                    'token_match': token_match
+                })
+        return matches
+
+    def _has_high_confidence_keywords() -> list:
+        """Find high confidence TGE keywords"""
+        return [k for k in HIGH_CONFIDENCE_TGE_KEYWORDS if _has(k)]
+
+    def _has_medium_confidence_keywords() -> list:
+        """Find medium confidence TGE keywords"""
+        return [k for k in MEDIUM_CONFIDENCE_TGE_KEYWORDS if _has(k)]
+
+    def _has_multiple_tge_signals() -> bool:
+        """Check for multiple TGE-related signals in the text"""
+        tge_signals = [
+            "token", "coin", "crypto", "blockchain", "defi", "web3",
+            "mainnet", "testnet", "protocol", "network", "chain",
+            "launch", "release", "deploy", "announce", "live"
+        ]
+        signal_count = sum(1 for signal in tge_signals if _has(signal))
+        return signal_count >= 2  # Lower threshold for tweets (shorter content)
+
+    # Find company matches
+    company_matches = _find_company_matches()
+    if not company_matches:
         return False
 
-    def _keyword_hit() -> bool:
-        return any(_has(k) for k in TGE_KEYWORDS)
-
-    def _strong_tge_keywords() -> bool:
-        """High-confidence TGE keywords that don't need company match"""
-        strong_keywords = [
-            "token generation event", "tge", "token launch", "token release",
-            "airdrop", "token sale", "ico", "ido", "token distribution"
-        ]
-        return any(_has(k) for k in strong_keywords)
-
-    def _tge_context_words() -> bool:
-        """Context words that suggest TGE when combined with company"""
-        context_words = [
-            "launch", "release", "deploy", "mint", "create", "generate",
-            "announce", "coming", "soon", "date", "schedule", "timeline"
-        ]
-        return any(_has(w) for w in context_words)
-
-    # Strategy 1: Company + keyword (original logic)
-    if _company_hit() and _keyword_hit():
+    # Strategy 1: High confidence TGE keywords + company match
+    high_conf_keywords = _has_high_confidence_keywords()
+    if high_conf_keywords and company_matches:
         return True
 
-    # Strategy 2: Strong TGE keywords (high confidence standalone)
-    if _strong_tge_keywords():
+    # Strategy 2: Medium confidence keywords + company + multiple TGE signals
+    medium_conf_keywords = _has_medium_confidence_keywords()
+    if medium_conf_keywords and company_matches and _has_multiple_tge_signals():
         return True
 
-    # Strategy 3: Company + TGE context words
-    if _company_hit() and _tge_context_words():
-        return True
+    # Strategy 3: Token symbol + specific TGE action words
+    token_specific_actions = ["launch", "release", "deploy", "mint", "distribute", "airdrop"]
+    for match in company_matches:
+        if match['token_match'] and any(_has(action) for action in token_specific_actions):
+            return True
 
     return False
 

@@ -24,7 +24,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from src.news_scraper import NewsScraper
 from src.email_notifier import EmailNotifier
 from src.twitter_monitor import TwitterMonitor
-from config import COMPANIES, NEWS_SOURCES, LOG_CONFIG, TGE_KEYWORDS
+from config import COMPANIES, NEWS_SOURCES, LOG_CONFIG, TGE_KEYWORDS, HIGH_CONFIDENCE_TGE_KEYWORDS, MEDIUM_CONFIDENCE_TGE_KEYWORDS, LOW_CONFIDENCE_TGE_KEYWORDS
 from src.utils import setup_structured_logging, HealthChecker, retry_on_failure
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
@@ -67,78 +67,136 @@ def _text_from_alert(alert: dict) -> str:
 
 def matches_company_and_keyword(alert: dict) -> bool:
     """
-    Flexible matching: require either:
-    1. Company name AND keyword in same text, OR
-    2. Strong TGE keyword with high confidence, OR  
-    3. Company name with TGE context words
+    Improved matching logic with stricter criteria to reduce false positives:
+    1. High confidence: Strong TGE keywords + company match
+    2. Medium confidence: Medium TGE keywords + company match + additional context
+    3. Token symbol matching for precision
+    4. Exclusion filtering to avoid false positives
     """
     # Validate alert structure
     if not isinstance(alert, dict):
         return False
-    
+
     text = _text_from_alert(alert).lower()
     if not text or len(text.strip()) < 10:  # Minimum text length
         return False
-    
+
     # Quality checks
     if len(text) > 50000:  # Too long, likely spam
         return False
 
     def _has(token: str) -> bool:
+        """Check if token exists as whole word"""
+        if not token.strip():
+            return False
         token = re.escape(token.strip())
         return re.search(rf"\b{token}\b", text, flags=re.IGNORECASE) is not None
 
-    def _company_hit() -> bool:
+    def _find_company_matches() -> list:
+        """Find all matching companies and return match details"""
+        matches = []
         for c in COMPANIES:
-            if isinstance(c, dict):
-                names = [c.get("name","")] + c.get("aliases", [])
-            else:
-                names = [str(c)]
-            if any(_has(n) for n in names if n):
-                return True
+            if not isinstance(c, dict):
+                continue
+
+            company_name = c.get("name", "")
+            aliases = c.get("aliases", [])
+            tokens = c.get("tokens", [])
+            exclusions = c.get("exclusions", [])
+
+            # Check for exclusion words first
+            if any(_has(excl) for excl in exclusions):
+                continue
+
+            # Check company name and aliases
+            all_names = [company_name] + aliases
+            name_match = any(_has(name) for name in all_names if name)
+
+            # Check token symbols
+            token_match = any(_has(token) for token in tokens)
+
+            if name_match or token_match:
+                matches.append({
+                    'company': c,
+                    'name_match': name_match,
+                    'token_match': token_match
+                })
+        return matches
+
+    def _has_high_confidence_keywords() -> list:
+        """Find high confidence TGE keywords"""
+        return [k for k in HIGH_CONFIDENCE_TGE_KEYWORDS if _has(k)]
+
+    def _has_medium_confidence_keywords() -> list:
+        """Find medium confidence TGE keywords"""
+        return [k for k in MEDIUM_CONFIDENCE_TGE_KEYWORDS if _has(k)]
+
+    def _has_multiple_tge_signals() -> bool:
+        """Check for multiple TGE-related signals in the text"""
+        tge_signals = [
+            "token", "coin", "crypto", "blockchain", "defi", "web3",
+            "mainnet", "testnet", "protocol", "network", "chain",
+            "launch", "release", "deploy", "announce", "live"
+        ]
+        signal_count = sum(1 for signal in tge_signals if _has(signal))
+        return signal_count >= 3
+
+    # Find company matches
+    company_matches = _find_company_matches()
+    if not company_matches:
         return False
 
-    def _keyword_hit() -> bool:
-        return any(_has(k) for k in TGE_KEYWORDS)
-
-    def _strong_tge_keywords() -> bool:
-        """High-confidence TGE keywords that don't need company match"""
-        strong_keywords = [
-            "token generation event", "tge", "token launch", "token release",
-            "airdrop", "token sale", "ico", "ido", "token distribution"
-        ]
-        return any(_has(k) for k in strong_keywords)
-
-    def _tge_context_words() -> bool:
-        """Context words that suggest TGE when combined with company"""
-        context_words = [
-            "launch", "release", "deploy", "mint", "create", "generate",
-            "announce", "coming", "soon", "date", "schedule", "timeline"
-        ]
-        return any(_has(w) for w in context_words)
-
-    # Strategy 1: Company + keyword (original logic)
-    if _company_hit() and _keyword_hit():
+    # Strategy 1: High confidence TGE keywords + company match
+    high_conf_keywords = _has_high_confidence_keywords()
+    if high_conf_keywords and company_matches:
         return True
-    
-    # Strategy 2: Strong TGE keywords (high confidence standalone)
-    if _strong_tge_keywords():
+
+    # Strategy 2: Medium confidence keywords + company + multiple TGE signals
+    medium_conf_keywords = _has_medium_confidence_keywords()
+    if medium_conf_keywords and company_matches and _has_multiple_tge_signals():
         return True
-    
-    # Strategy 3: Company + TGE context words
-    if _company_hit() and _tge_context_words():
-        return True
+
+    # Strategy 3: Token symbol + specific TGE action words
+    token_specific_actions = ["launch", "release", "deploy", "mint", "distribute", "airdrop"]
+    for match in company_matches:
+        if match['token_match'] and any(_has(action) for action in token_specific_actions):
+            return True
 
     return False
 
 def alert_key(alert: dict) -> str:
     """
-    Stable ID for de-dup: prefer URL; else title+source+date.
+    Enhanced deduplication key generation with multiple strategies:
+    1. Primary: URL-based deduplication
+    2. Fallback: Content hash for similar articles
+    3. Title+source+date for unique identification
     """
-    basis = (
-        alert.get("url")
-        or f"{alert.get('title','')}|{alert.get('source','')}|{alert.get('published','')}"
-    )
+    # Strategy 1: URL-based (most reliable)
+    url = alert.get("url") or alert.get("link")
+    if url:
+        # Normalize URLs to catch duplicates with tracking parameters
+        import urllib.parse
+        parsed = urllib.parse.urlparse(url)
+        # Remove common tracking parameters
+        clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+        return hashlib.sha1(clean_url.encode("utf-8", errors="ignore")).hexdigest()
+
+    # Strategy 2: Content-based hash for articles without clear URLs
+    title = alert.get("title", "").strip()
+    content = alert.get("summary", "") or alert.get("content", "")
+
+    # Create content fingerprint by extracting key phrases (first 200 chars of content)
+    content_snippet = content[:200].strip() if content else ""
+
+    # Strategy 3: Combination approach
+    basis_parts = [
+        title,
+        alert.get("source", ""),
+        str(alert.get("published", "")),
+        content_snippet
+    ]
+    basis = "|".join(part for part in basis_parts if part)
+
     return hashlib.sha1(basis.encode("utf-8", errors="ignore")).hexdigest()
 
 def load_seen() -> set[str]:
@@ -152,7 +210,20 @@ def load_seen() -> set[str]:
     return set()
 
 def save_seen(seen: set[str]) -> None:
+    """
+    Save seen alerts with automatic cleanup to prevent indefinite growth.
+    Keep only the most recent 10,000 items to balance memory and effectiveness.
+    """
     os.makedirs(STATE_DIR, exist_ok=True)
+
+    # Limit the size of seen items to prevent memory issues
+    MAX_SEEN_ITEMS = 10000
+    if len(seen) > MAX_SEEN_ITEMS:
+        # Keep the most recently added items (simple approach: keep last N sorted items)
+        # Note: This is a simplified approach. In production, you might want to track timestamps
+        seen = set(sorted(seen)[-MAX_SEEN_ITEMS:])
+        logging.getLogger(__name__).info(f"Trimmed seen items to {MAX_SEEN_ITEMS} for performance")
+
     tmp = SEEN_PATH + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(sorted(seen), f, ensure_ascii=False, indent=2)
