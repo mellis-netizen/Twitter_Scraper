@@ -21,9 +21,30 @@ jobs:
     - name: Setup SSH Key
       run: |
         mkdir -p ~/.ssh
-        echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/id_rsa
+
+        # Create key file with proper formatting
+        cat << 'KEY_EOF' > ~/.ssh/id_rsa
+        ${{ secrets.EC2_SSH_KEY }}
+        KEY_EOF
+
+        # Fix permissions and format
         chmod 600 ~/.ssh/id_rsa
+
+        # Remove any carriage returns and ensure proper line endings
+        sed -i 's/\r$//' ~/.ssh/id_rsa
+
+        # Add known hosts
         ssh-keyscan -H ${{ secrets.EC2_HOST }} >> ~/.ssh/known_hosts
+
+        # Debug output
+        echo "=== SSH Key Debug ==="
+        echo "Key file size: $(wc -c < ~/.ssh/id_rsa) bytes"
+        echo "Key starts with: $(head -1 ~/.ssh/id_rsa)"
+        echo "Key ends with: $(tail -1 ~/.ssh/id_rsa)"
+        echo "Key line count: $(wc -l < ~/.ssh/id_rsa)"
+
+        # Test key format
+        ssh-keygen -l -f ~/.ssh/id_rsa || echo "Key format validation failed"
 
     - name: Deploy to EC2
       run: |
