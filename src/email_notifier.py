@@ -455,7 +455,7 @@ class EmailNotifier:
                     color: #718096;
                     margin-bottom: 12px;
                 }}
-                .companies, .keywords, .score {{
+                .companies, .keywords, .tokens, .score {{
                     padding: 6px 12px;
                     border-radius: 6px;
                     margin: 4px 6px 4px 0;
@@ -472,6 +472,11 @@ class EmailNotifier:
                     background-color: #fff8e1;
                     color: #ef6c00;
                     border: 1px solid #ffcc02;
+                }}
+                .tokens {{
+                    background-color: #f3e5f5;
+                    color: #7b1fa2;
+                    border: 1px solid #ce93d8;
                 }}
                 .score {{
                     background-color: #e8f5e8;
@@ -563,21 +568,46 @@ class EmailNotifier:
                 else:
                     pub_str = 'Unknown'
 
-                comps = ''.join(f'<span class="companies">🏢 {c}</span>'
-                                for c in sorted(alert.get('mentioned_companies', [])))
-                keys  = ''.join(f'<span class="keywords">🔑 {k}</span>'
-                                for k in sorted(alert.get('found_keywords', [])))
-                score = f'<span class="score">📊 Score: {alert.get("relevance_score", 0):.2f}</span>'
+                # Extract match details for enhanced display
+                match_details = alert.get('match_details', {})
+                companies = match_details.get('matched_companies', [])
+                keywords = match_details.get('matched_keywords', [])
+                tokens = match_details.get('matched_tokens', [])
+                confidence = match_details.get('confidence_score', 0)
+                strategy = match_details.get('match_strategy', 'unknown')
+                priority = match_details.get('priority_level', 'UNKNOWN')
+
+                # Generate company tags with priority indicators
+                comps = ''.join(f'<span class="companies" title="Priority: {priority}">🏢 {c}</span>'
+                                for c in sorted(companies))
+
+                # Generate keyword tags with strategy info
+                keys = ''.join(f'<span class="keywords" title="Strategy: {strategy}">🔑 {k}</span>'
+                               for k in sorted(keywords))
+
+                # Add token tags if any
+                token_tags = ''.join(f'<span class="tokens" title="Token Symbol">🪙 {t}</span>'
+                                   for t in sorted(tokens)) if tokens else ''
+
+                # Enhanced confidence score with strategy info
+                score = f'<span class="score" title="Strategy: {strategy}">📊 {confidence}% confidence</span>'
 
                 html += f"""
                         <div class="alert-item">
                             <div class="alert-title">{self._sanitize_content(art.get('title') or 'Untitled')}</div>
+                            <div class="company-info" style="margin: 8px 0; padding: 8px; background-color: #f0f8ff; border-left: 4px solid #007bff; border-radius: 4px;">
+                                <strong>🎯 Detected Companies:</strong> {comps or '<span style="color: #666;">None detected</span>'}
+                            </div>
                             <div class="alert-meta">
                                 <strong>Source:</strong> {self._sanitize_content(art.get('source_name',''))} |
                                 <strong>Published:</strong> {pub_str}
                             </div>
                             <div><a href="{art.get('link') or '#'}" class="link" target="_blank">Read Full Article →</a></div>
-                            <div style="margin-top: 8px;">{comps}{keys}{score}</div>
+                            <div class="keyword-info" style="margin: 8px 0; padding: 8px; background-color: #fff8e1; border-left: 4px solid #ffa000; border-radius: 4px;">
+                                <strong>🔍 Triggering Keywords:</strong> {keys or '<span style="color: #666;">None detected</span>'}
+                                {f'<br><strong>🪙 Token Symbols:</strong> {token_tags}' if token_tags else ''}
+                            </div>
+                            <div style="margin-top: 8px;">{score}</div>
                             <div class="summary-content" style="margin-top: 12px;">
                                 {self._clean_summary(art.get('summary') or '')}
                             </div>
@@ -605,15 +635,36 @@ class EmailNotifier:
                 else:
                     ts_str = 'Unknown'
 
-                comps = ''.join(f'<span class="companies">🏢 {c}</span>'
-                                for c in sorted(alert.get('mentioned_companies', [])))
-                keys  = ''.join(f'<span class="keywords">🔑 {k}</span>'
-                                for k in sorted(alert.get('found_keywords', [])))
-                score = f'<span class="score">📊 Score: {alert.get("relevance_score", 0):.2f}</span>'
+                # Extract match details for Twitter alerts
+                match_details = alert.get('match_details', {})
+                companies = match_details.get('matched_companies', [])
+                keywords = match_details.get('matched_keywords', [])
+                tokens = match_details.get('matched_tokens', [])
+                confidence = match_details.get('confidence_score', 0)
+                strategy = match_details.get('match_strategy', 'unknown')
+                priority = match_details.get('priority_level', 'UNKNOWN')
+
+                # Generate company tags
+                comps = ''.join(f'<span class="companies" title="Priority: {priority}">🏢 {c}</span>'
+                                for c in sorted(companies))
+
+                # Generate keyword tags
+                keys = ''.join(f'<span class="keywords" title="Strategy: {strategy}">🔑 {k}</span>'
+                               for k in sorted(keywords))
+
+                # Add token tags if any
+                token_tags = ''.join(f'<span class="tokens" title="Token Symbol">🪙 {t}</span>'
+                                   for t in sorted(tokens)) if tokens else ''
+
+                # Enhanced confidence score
+                score = f'<span class="score" title="Strategy: {strategy}">📊 {confidence}% confidence</span>'
 
                 html += f"""
                         <div class="alert-item">
                             <div class="alert-title">@{tweet.get('user',{}).get('screen_name','unknown')} - {tweet.get('user',{}).get('name','Unknown')}</div>
+                            <div class="company-info" style="margin: 8px 0; padding: 8px; background-color: #f0f8ff; border-left: 4px solid #007bff; border-radius: 4px;">
+                                <strong>🎯 Detected Companies:</strong> {comps or '<span style="color: #666;">None detected</span>'}
+                            </div>
                             <div class="alert-meta">
                                 <strong>Posted:</strong> {ts_str} |
                                 <strong>Engagement:</strong> {tweet.get('retweet_count',0)} RTs, {tweet.get('favorite_count',0)} Likes |
@@ -621,7 +672,11 @@ class EmailNotifier:
                             </div>
                             <div><a href="{tweet.get('url') or '#'}" class="link" target="_blank">View Tweet →</a></div>
                             <div class="tweet-content">{self._sanitize_content(tweet.get('text',''))}</div>
-                            <div style="margin-top: 8px;">{comps}{keys}{score}</div>
+                            <div class="keyword-info" style="margin: 8px 0; padding: 8px; background-color: #fff8e1; border-left: 4px solid #ffa000; border-radius: 4px;">
+                                <strong>🔍 Triggering Keywords:</strong> {keys or '<span style="color: #666;">None detected</span>'}
+                                {f'<br><strong>🪙 Token Symbols:</strong> {token_tags}' if token_tags else ''}
+                            </div>
+                            <div style="margin-top: 8px;">{score}</div>
                         </div>
                 """
             html += "</div></div>"

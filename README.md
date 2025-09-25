@@ -1,8 +1,8 @@
 # Crypto TGE Monitor
 
-A production-ready cryptocurrency Token Generation Event (TGE) monitoring system that continuously monitors news sources and Twitter for TGE-related announcements from specific companies and sends email alerts when relevant content is detected.
+A Token Generation Event (TGE) monitoring system that continuously monitors news sources and Twitter for TGE-related announcements from specific companies and sends email alerts when relevant content is detected.
 
-## 🚀 Features
+## Features
 
 - **News Monitoring**: Monitors 60+ cryptocurrency news sources via RSS feeds
 - **Twitter Monitoring**: Tracks Twitter timelines and searches for TGE announcements
@@ -13,11 +13,11 @@ A production-ready cryptocurrency Token Generation Event (TGE) monitoring system
 - **Health Monitoring**: Comprehensive system health checks and metrics
 - **Production Ready**: Systemd service, log rotation, and automated deployment
 
-## 📊 System Status
+## System Status
 
 The system monitors **19 companies** and **65+ TGE keywords** across multiple news sources and social media platforms.
 
-## 🛠️ Quick Start
+## Quick Start
 
 ### Local Development
 
@@ -61,7 +61,7 @@ The system monitors **19 companies** and **65+ TGE keywords** across multiple ne
    python src/main.py --mode status
    ```
 
-## 🌐 Production Deployment (EC2)
+## AWS Deployment (EC2)
 
 ### Automated Deployment
 
@@ -102,7 +102,7 @@ The repository includes automated deployment via GitHub Actions:
    sudo ./update.sh
    ```
 
-## 📧 Email Configuration
+## Email Configuration
 
 ### Gmail Setup (Recommended)
 
@@ -132,7 +132,7 @@ SMTP_SERVER=your-smtp-server.com
 SMTP_PORT=587
 ```
 
-## 🐦 Twitter Configuration (Optional)
+## Twitter Configuration
 
 1. **Get Twitter Bearer Token:**
    - Apply for Twitter Developer Account
@@ -149,7 +149,7 @@ SMTP_PORT=587
    DISABLE_TWITTER=1
    ```
 
-## 📁 Repository Structure
+## Repository Structure
 
 ```
 crypto-tge-monitor/
@@ -163,14 +163,14 @@ crypto-tge-monitor/
 ├── .github/workflows/            # GitHub Actions CI/CD
 ├── config.py                     # Configuration and constants
 ├── requirements.txt              # Python dependencies
-├── deploy.sh                     # Production deployment script
-├── update.sh                     # Production update script
+├── deploy.sh                     # Deployment script
+├── update.sh                     # Update script
 ├── .env.example                  # Environment template
 ├── CLAUDE.md                     # Development documentation
 └── README.md                     # This file
 ```
 
-## 🔧 Configuration
+## Configuration
 
 ### Companies Monitored
 
@@ -196,14 +196,14 @@ The system monitors 19 companies including:
 - DeFi focused: Bankless, CryptoBriefing
 - Network blogs: Ethereum, Arbitrum, Avalanche
 
-## 🎯 Monitoring Modes
+## Monitoring Modes
 
 - **`once`**: Single monitoring cycle (good for testing)
 - **`continuous`**: Runs once daily at 9 AM UTC (production mode)
 - **`test`**: Tests all components individually
 - **`status`**: Shows current system health and statistics
 
-## 📊 System Management
+## System Management
 
 ### Service Commands (Production)
 ```bash
@@ -226,7 +226,7 @@ sudo systemctl start crypto-tge-monitor
 - **System logs**: `journalctl -u crypto-tge-monitor`
 - **Log rotation**: Automatic daily rotation, 30 days retention
 
-## 🔍 Troubleshooting
+## Troubleshooting
 
 ### Common Issues
 
@@ -261,7 +261,7 @@ The system includes comprehensive health monitoring:
 - API rate limit status
 - Memory and performance metrics
 
-## 🚀 Development
+## Development
 
 ### Adding New Companies
 
@@ -293,7 +293,7 @@ NEWS_SOURCES = [
 ]
 ```
 
-## 📈 Performance
+## Performance
 
 - **Memory usage**: ~120MB typical, ~200MB peak
 - **CPU usage**: Minimal (< 5% during cycles)
@@ -301,7 +301,7 @@ NEWS_SOURCES = [
 - **Cycle time**: 60-90 seconds average per monitoring cycle
 - **Response time**: Email alerts sent within 2-5 minutes of detection
 
-## 🔐 Security
+## Security
 
 - Input sanitization for all email content
 - HTML entity escaping to prevent XSS
@@ -309,9 +309,9 @@ NEWS_SOURCES = [
 - Systemd security restrictions (NoNewPrivileges, PrivateTmp, etc.)
 - Log rotation to prevent disk space issues
 
-## 📝 License
+## License
 
-This project is proprietary software. All rights reserved.
+This project is open source under the MIT license. Do as you will. 
 
 ## 🤝 Support
 
@@ -320,7 +320,7 @@ For issues, questions, or feature requests:
 2. Review logs for error messages
 3. Open an issue in this repository
 
-## 📊 Monitoring Dashboard
+## Monitoring Dashboard
 
 Access system status anytime:
 ```bash
@@ -328,8 +328,8 @@ python src/main.py --mode status
 ```
 
 This shows:
-- ✅ Service health status
-- 📊 Processing statistics
-- 🔍 Component diagnostics
-- ⚡ Performance metrics
-- 🎯 Alert history
+- Service health status
+- Processing statistics
+- Component diagnostics
+- Performance metrics
+- Alert history

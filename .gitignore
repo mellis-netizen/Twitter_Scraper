@@ -64,6 +64,7 @@ htmlcov/
 
 # Documentation
 docs/_build/
+CLAUDE.md
 
 # Temporary files
 *.tmp
