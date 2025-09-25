@@ -149,17 +149,32 @@ def matches_company_and_keyword(alert: dict) -> bool:
     # Strategy 1: High confidence TGE keywords + company match
     high_conf_keywords = _has_high_confidence_keywords()
     if high_conf_keywords and company_matches:
-        return True
+        # Extra validation for high-priority companies
+        for match in company_matches:
+            priority = match['company'].get('priority', 'LOW')
+            if priority == 'HIGH':
+                return True  # High priority companies with high confidence keywords always match
+            elif priority == 'MEDIUM' and len(high_conf_keywords) >= 1:
+                return True  # Medium priority needs at least one strong keyword
+            elif priority == 'LOW' and len(high_conf_keywords) >= 2:
+                return True  # Low priority needs multiple strong keywords
+        return True  # Fallback for companies without priority
 
     # Strategy 2: Medium confidence keywords + company + multiple TGE signals
     medium_conf_keywords = _has_medium_confidence_keywords()
     if medium_conf_keywords and company_matches and _has_multiple_tge_signals():
-        return True
+        # Only for HIGH priority companies
+        for match in company_matches:
+            if match['company'].get('priority') == 'HIGH':
+                return True
+        return False
 
-    # Strategy 3: Token symbol + specific TGE action words
+    # Strategy 3: Token symbol + specific TGE action words (HIGH priority only)
     token_specific_actions = ["launch", "release", "deploy", "mint", "distribute", "airdrop"]
     for match in company_matches:
-        if match['token_match'] and any(_has(action) for action in token_specific_actions):
+        if (match['token_match'] and
+            any(_has(action) for action in token_specific_actions) and
+            match['company'].get('priority') == 'HIGH'):
             return True
 
     return False

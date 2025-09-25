@@ -115,231 +115,169 @@ def validate_config() -> Dict[str, bool]:
     
     return validation_results
 
-# Companies to monitor (with aliases and token symbols for precise matching)
+# Companies to monitor - optimized for TGE detection with research-based configurations
+# Priority levels: HIGH = likely to have TGE soon, MEDIUM = established but may announce new tokens, LOW = monitoring only
 COMPANIES = [
-    {"name": "Corn", "aliases": ["Corn Protocol", "Corn Finance"], "tokens": ["CORN"], "exclusions": ["popcorn", "corn futures", "corn price"]},
-    {"name": "Curvance", "aliases": ["Curvance Finance", "Curvance Protocol"], "tokens": ["CRV", "CURV"], "exclusions": []},
-    {"name": "Darkbright", "aliases": ["Darkbright Labs", "Darkbright Protocol"], "tokens": [], "exclusions": []},
-    {"name": "Fabric", "aliases": ["Fabric Protocol", "Fabric Labs", "Fabric Cryptography"], "tokens": ["FAB"], "exclusions": ["fabric softener", "textile fabric", "fabric store"]},
-    {"name": "Caldera", "aliases": ["Caldera Labs", "Caldera Protocol", "Caldera Chain"], "tokens": ["CAL"], "exclusions": ["volcanic caldera", "yellowstone caldera"]},
-    {"name": "Open Eden", "aliases": ["OpenEden", "Open Eden Protocol"], "tokens": ["TBILL"], "exclusions": []},
-    {"name": "XAI", "aliases": ["XAI Games", "Xai", "Xai Games"], "tokens": ["XAI"], "exclusions": ["explainable ai", "xai technology"]},
-    {"name": "Espresso", "aliases": ["Espresso Systems", "Espresso Labs"], "tokens": ["ESPR"], "exclusions": ["coffee", "espresso machine", "starbucks"]},
-    {"name": "Clique", "aliases": ["Clique Protocol", "Clique Labs"], "tokens": ["CLI"], "exclusions": ["social clique", "clique theory"]},
-    {"name": "TreasureDAO", "aliases": ["Treasure DAO", "Treasure", "Treasure Protocol"], "tokens": ["MAGIC"], "exclusions": ["treasure hunt", "national treasure"]},
-    {"name": "Camelot", "aliases": ["Camelot DEX", "Camelot Protocol"], "tokens": ["GRAIL"], "exclusions": ["king arthur", "camelot movie"]},
-    {"name": "DuckChain", "aliases": ["Duck Chain", "DuckChain Protocol"], "tokens": ["DUCK"], "exclusions": ["rubber duck", "donald duck"]},
-    {"name": "Spacecoin", "aliases": ["Space Coin", "Spacecoin Protocol"], "tokens": ["SPACE"], "exclusions": ["nasa", "space exploration"]},
-    {"name": "Fhenix", "aliases": ["Fhenix Token", "Fhenix Protocol"], "tokens": ["FHE"], "exclusions": []},
-    {"name": "USD.ai", "aliases": ["USDai", "USD AI", "USD.ai Protocol"], "tokens": ["USDAI"], "exclusions": []},
-    {"name": "Huddle01", "aliases": ["Huddle 01", "Huddle01 Protocol"], "tokens": ["HUD"], "exclusions": ["football huddle", "team huddle"]},
-    {"name": "Succinct", "aliases": ["Succinct Labs", "Succinct Protocol"], "tokens": ["SUC"], "exclusions": ["succinct definition", "succinct writing"]}
+    # HIGH PRIORITY - Active development, no token yet
+    {"name": "Curvance", "aliases": ["Curvance Finance", "Curvance Protocol"], "tokens": ["CRV", "CURV"], "exclusions": [], "priority": "HIGH", "status": "pre_token"},
+    {"name": "Fhenix", "aliases": ["Fhenix Protocol", "Fhenix Labs"], "tokens": ["FHE"], "exclusions": [], "priority": "HIGH", "status": "pre_token"},
+    {"name": "Succinct", "aliases": ["Succinct Labs", "Succinct Protocol"], "tokens": ["SP1", "SUC"], "exclusions": ["succinct definition", "succinct writing"], "priority": "HIGH", "status": "pre_token"},
+    {"name": "Caldera", "aliases": ["Caldera Labs", "Caldera Protocol", "Caldera Chain"], "tokens": ["CAL"], "exclusions": ["volcanic caldera", "yellowstone caldera"], "priority": "HIGH", "status": "pre_token"},
+    {"name": "Fabric", "aliases": ["Fabric Protocol", "Fabric Labs", "Fabric Cryptography"], "tokens": ["FAB"], "exclusions": ["fabric softener", "textile fabric", "fabric store"], "priority": "HIGH", "status": "pre_token"},
+
+    # MEDIUM PRIORITY - Established projects that may launch additional tokens
+    {"name": "TreasureDAO", "aliases": ["Treasure DAO", "Treasure", "Treasure Protocol"], "tokens": ["MAGIC"], "exclusions": ["treasure hunt", "national treasure"], "priority": "MEDIUM", "status": "has_token"},
+    {"name": "Camelot", "aliases": ["Camelot DEX", "Camelot Protocol"], "tokens": ["GRAIL"], "exclusions": ["king arthur", "camelot movie"], "priority": "MEDIUM", "status": "has_token"},
+    {"name": "XAI", "aliases": ["Xai Games", "Xai", "XAI Games"], "tokens": ["XAI"], "exclusions": ["explainable ai", "xai technology"], "priority": "MEDIUM", "status": "has_token"},
+    {"name": "Huddle01", "aliases": ["Huddle 01", "Huddle01 Protocol"], "tokens": ["HUD01", "HUDDLE"], "exclusions": ["football huddle", "team huddle"], "priority": "MEDIUM", "status": "pre_token"},
+
+    # LOWER PRIORITY - Less clear token plans or stablecoins
+    {"name": "Open Eden", "aliases": ["OpenEden", "Open Eden Protocol"], "tokens": ["TBILL"], "exclusions": [], "priority": "LOW", "status": "has_token"},
+    {"name": "USD.ai", "aliases": ["USDai", "USD AI", "USD.ai Protocol"], "tokens": ["USDAI"], "exclusions": [], "priority": "LOW", "status": "stablecoin"},
+    {"name": "Espresso", "aliases": ["Espresso Systems", "Espresso Labs"], "tokens": ["ESPR"], "exclusions": ["coffee", "espresso machine", "starbucks"], "priority": "LOW", "status": "infrastructure"},
+
+    # EXPERIMENTAL - Less certain companies, monitoring for activity
+    {"name": "DuckChain", "aliases": ["Duck Chain", "DuckChain Protocol"], "tokens": ["DUCK"], "exclusions": ["rubber duck", "donald duck"], "priority": "LOW", "status": "experimental"},
+    {"name": "Spacecoin", "aliases": ["Space Coin", "Spacecoin Protocol"], "tokens": ["SPACE"], "exclusions": ["nasa", "space exploration"], "priority": "LOW", "status": "experimental"},
+    {"name": "Clique", "aliases": ["Clique Protocol", "Clique Labs"], "tokens": ["CLI"], "exclusions": ["social clique", "clique theory"], "priority": "LOW", "status": "experimental"}
 ]
 
 # TGE-related keywords - categorized by confidence level
-# High confidence keywords (strong TGE indicators)
+# High confidence keywords (strong TGE indicators) - optimized for 2024/2025 terminology
 HIGH_CONFIDENCE_TGE_KEYWORDS = [
+    # Core TGE terminology
     "TGE", "token generation event", "token launch", "token release",
-    "token distribution", "airdrop", "token sale", "ICO", "IDO",
-    "token listing", "token launch date", "token generation",
-    "token deployment", "token goes live", "token trading launch",
-    "token presale", "token public sale", "governance token launch",
-    "utility token launch", "mainnet token launch"
+    "token distribution", "token deployment", "token goes live",
+
+    # Modern launch terminology
+    "airdrop", "token sale", "IDO", "initial dex offering",
+    "token listing", "token trading", "trading goes live",
+    "mainnet token", "governance token launch", "utility token launch",
+
+    # Specific announcement patterns
+    "announcing.*token", "excited to announce.*token", "proud to announce.*token",
+    "token launch date", "token coming soon", "token dropping",
+    "claim your.*token", "eligible for.*airdrop", "airdrop live"
 ]
 
-# Medium confidence keywords (require company context)
+# Medium confidence keywords (require company context) - contextual TGE signals
 MEDIUM_CONFIDENCE_TGE_KEYWORDS = [
-    "mainnet launch", "mainnet release", "mainnet deployment",
-    "protocol launch", "network launch", "platform launch",
-    "token minting", "token creation", "token unlock",
-    "token emission", "tokenomics", "token economics",
-    "launching", "going live", "live on mainnet"
+    # Launch terminology that often precedes TGE
+    "mainnet launch", "mainnet deployment", "protocol launch",
+    "network launch", "platform launch", "chain launch",
+
+    # Token-related but needs context
+    "tokenomics", "token economics", "token model",
+    "token unlock", "token vesting", "token emission",
+    "governance token", "utility token",
+
+    # Action words requiring company context
+    "launching soon", "going live", "live on mainnet",
+    "beta launch", "public launch", "official launch"
 ]
 
-# Low confidence keywords (require company + multiple indicators)
+# Low confidence keywords (require company + multiple strong indicators)
 LOW_CONFIDENCE_TGE_KEYWORDS = [
+    # Generic announcement terms
     "announce", "announced", "announcing", "announcement",
-    "releasing", "deploying", "coming soon", "launch date",
-    "release date", "go live", "available on", "trading on", "listed on"
+    "introducing", "excited to share", "big news",
+
+    # Timing indicators
+    "coming soon", "launch date", "release date", "go live",
+    "next week", "this month", "Q1", "Q2", "Q3", "Q4",
+
+    # Platform/exchange related
+    "available on", "trading on", "listed on", "live on",
+    "integrated with", "deployed on"
 ]
 
 # Combined list for backward compatibility
 TGE_KEYWORDS = HIGH_CONFIDENCE_TGE_KEYWORDS + MEDIUM_CONFIDENCE_TGE_KEYWORDS + LOW_CONFIDENCE_TGE_KEYWORDS
 
-# Crypto news sources (EVM-focused; removed bitcoin-only outlets)
+# Optimized news sources - prioritized for TGE announcement coverage
 NEWS_SOURCES = [
-    # General crypto with strong EVM/DeFi coverage
-    "https://decrypt.co/feed",
-    "https://www.theblock.co/rss.xml",
-    "https://www.coindesk.com/arc/outboundfeeds/rss",
-        
-    # DeFi / EVM native outlets
-    "https://thedefiant.io/feed",  # The Defiant
-    "https://www.bankless.com/feed", 
-    "https://cryptobriefing.com/feed",
-    "https://cointelegraph.com/rss",
-    "https://zycrypto.com/feed/",
-    "https://www.cryptocurrencyscript.com/blog/feed",
-    "https://e-cryptonews.com/feed/",
-    "https://coinidol.com/rss2/",
-    "https://zebpay.com/feed",
-    "https://coincheckup.com/blog/feed/",
-    "https://bitcoinethereumnews.com/feed/",
-    "https://u.today/rss.php",
-    "https://blockchain.news/rss",
-    "https://currencycrypt.net/feed/",
-    "https://coingeek.com/feed/",
-    "https://cryptoadventure.com/feed/",
-    "https://www.cryptobreaking.com/feed/",
-    "https://ambcrypto.com/feed/",
-    "https://www.platinumcryptoacademy.com/feed/",
-    "https://www.cryptela.com/blog-rss",
-    "https://decrypt.co/feed",
-    "https://moonwhale.io/feed/",
-    "https://moralis.com/blog/feed/",
-    "https://cryptobullsclub.com/feed/",
-    "https://robokoin.com/feed/",
-    "https://www.cryptomaton.org/feed/",
-    "https://www.trustnodes.com/feed",
-    "https://blog.bitmex.com/feed/",
-    "https://fullycrypto.com/feed",
-    "https://coindoo.com/feed/",
-    "https://dailycoin.com/feed/",
-    "https://blockonomi.com/feed/",
-    "https://blocknewsmedia.com/feed/",
-    "https://cryptopurview.com/feed/",
-    "https://www.talkcrypto.org/blog/feed/",
-    "https://thenewscrypto.com/feed/",
-    "https://blog.latoken.com/feed",
-    "https://coinlabz.com/feed/",
-    "https://walletinvestor.com/blog/feed/",
-    "https://tradecrypto.com/feed/",
-    "https://crypto-economy.com/feed/",
-    "https://nulltx.com/feed/",
-    "https://cryptoworldseo.com/feed/",
-    "https://vestorportal.com/rss/",
-    "https://coingape.com/feed/",
-    "https://cryptocurrencynews.com/feed/",
-    "https://www.cryptoninjas.net/feed/",
-    "https://blog.cex.io/feed",
-    "https://cryptoshrypto.com/feed/",
-    "https://www.cryptonewsz.com/feed/",
-    "https://coinchapter.com/feed/",
-    "https://thecryptobasic.com/feed/",
-    "https://webscrypto.com/feed/",
-    "https://bitpinas.com/feed/",
-    "https://cryptoexchange4u.com/feed/",
-    "https://allincrypto.com/feed/",
-    "https://coincentral.com/news/feed/",
-    "https://coinstats.app/blog/feed/",
-    "https://coinpedia.org/feed/",
-    "https://cryptonews.com/news/feed/",
-    "https://multicoin.capital/rss.xml",
-    "https://cryptodaily.co.uk/feed",
-    "https://cryptonews.com.au/feed/",
-    "https://medium.com/feed/coinmonks",
-    "https://blog.bitfinex.com/feed/",
-    "https://themarketscompass.substack.com/feed",
-    "https://www.thecoinspost.com/feed/",
-    "https://crypto.news/feed/",
-    "https://cryptopotato.com/feed/",
-    "https://www.dlnews.com/arc/outboundfeeds/rss/",    
-    # Network ecosystem blogs (major EVM L1/L2s)
-    "https://blog.ethereum.org/en/feed.xml",
-    "https://arbitrumfoundation.medium.com/feed",  # Arbitrum Foundation (Medium)
-    "https://medium.com/avalancheavax",
-    "https://coinjournal.net/feed/",
-    "https://avalancheavax.medium.com",
-    "https://blog.fantom.foundation/rss/",
-    "https://blog.cronos.org/feed/",  # Cronos
-    "https://medium.com/feed/@CeloOrg",  # Celo
-    "https://medium.com/feed/@AstarNetwork",  # Astar
+    # TIER 1: Primary sources for TGE announcements and early-stage project coverage
+    "https://www.theblock.co/rss.xml",        # The Block - excellent for major announcements
+    "https://decrypt.co/feed",                # Decrypt - good DeFi/Web3 coverage
+    "https://www.coindesk.com/arc/outboundfeeds/rss",  # CoinDesk - industry standard
+    "https://thedefiant.io/feed",             # The Defiant - DeFi focused
+    "https://www.bankless.com/feed",          # Bankless - ecosystem coverage
+    "https://www.dlnews.com/arc/outboundfeeds/rss/",  # DL News - quality reporting
+
+    # TIER 2: Secondary sources for broader coverage
+    "https://cointelegraph.com/rss",          # Cointelegraph - broad coverage
+    "https://cryptobriefing.com/feed",        # CryptoBriefing - analysis focused
+    "https://blockonomi.com/feed/",           # Blockonomi - project coverage
+    "https://bitcoinethereumnews.com/feed/",  # Bitcoin Ethereum News - altcoin focus
+
+    # TIER 3: Specialized and ecosystem sources
+    "https://u.today/rss.php",               # U.Today - good altcoin coverage
+    "https://ambcrypto.com/feed/",           # AMBCrypto - analysis
+    "https://dailycoin.com/feed/",           # DailyCoin - project news
+    "https://cryptopotato.com/feed/",        # CryptoPotato - broad coverage
+    "https://crypto.news/feed/",             # Crypto.news - timely updates
+    "https://www.trustnodes.com/feed",      # Trustnodes - technical focus
+    "https://multicoin.capital/rss.xml",    # Multicoin - VC perspective on projects
+
+    # TIER 4: Network ecosystem blogs for protocol-level announcements
+    "https://blog.ethereum.org/en/feed.xml",              # Ethereum Foundation
+    "https://arbitrumfoundation.medium.com/feed",         # Arbitrum Foundation
+    "https://medium.com/feed/@AstarNetwork",              # Astar Network
+    "https://blog.polygon.technology/feed/",              # Polygon blog (if available)
 ]
-# Company Twitter handles (verified and researched)
+# Optimized Twitter monitoring - focus on companies with active accounts and TGE potential
 COMPANY_TWITTERS = {
-    # Project/company accounts
-    "Corn": None,  # No official Twitter found
-    "Corn2": None,  # No official Twitter found
-    "Curvance": "@CurvanceFinance",
-    "Darkbright": None,  # No official Twitter found
-    "Fabric": "@fabric_xyz",
-    "Caldera": "@CalderaXYZ",
-    "Open Eden": "@OpenEden_HQ",
-    "XAI": "@XaiGames",
-    "Espresso": "@EspressoSys",
-    "2046 Angels Ltd": None,  # No official Twitter found
-    "Clique": None,  # No official Twitter found
-    "TreasureDAO": "@Treasure_DAO",
-    "Camelot": "@CamelotDEX",
-    "DuckChain": None,  # No official Twitter found
-    "Spacecoin": None,  # No official Twitter found
-    "FhenixToken": "@FhenixIO",
-    "USD.ai": None,  # No official Twitter found
-    "Huddle01": "@huddle01",
-    "Succinct": "@SuccinctLabs",
+    # HIGH PRIORITY - Active companies likely to announce TGE
+    "Curvance": "@CurvanceFinance",     # Pre-token, active development
+    "Fhenix": "@FhenixIO",              # Pre-token, FHE protocol
+    "Succinct": "@SuccinctLabs",        # Pre-token, ZK infrastructure
+    "Caldera": "@CalderaXYZ",           # Pre-token, rollup platform
+    "Fabric": "@fabric_xyz",            # Pre-token, cryptography
+
+    # MEDIUM PRIORITY - Established with potential for new tokens/updates
+    "TreasureDAO": "@Treasure_DAO",     # Has MAGIC, may launch additional tokens
+    "Camelot": "@CamelotDEX",          # Has GRAIL, DEX with expansion potential
+    "XAI": "@XaiGames",                # Gaming, established but growing
+    "Huddle01": "@huddle01",           # Pre-token, Web3 communication
+
+    # LOWER PRIORITY - Less likely to have immediate TGE
+    "Open Eden": "@OpenEden_HQ",       # Has TBILL, stablecoin focus
+    "Espresso": "@EspressoSys",        # Infrastructure, unclear token plans
 }
 
-# Core crypto/EVM news accounts to monitor (complementary to company handles)
+# Optimized Twitter news monitoring - focused on TGE announcement coverage
 CORE_NEWS_TWITTERS = [
-    # Major crypto news outlets
-    "@decryptmedia",
-    "@CoinDesk",
-    "@TheBlock__",
-    "@DefiantNews",
-    "@BanklessHQ",
-    "@DLNewsInfo",
-    "@cz_binance",
-    "@WatcherGuru",
-    "@willclemente",
-    "@MessariCrypto",
-    "@WuBlockchain",
-    "@a16zcrypto",
-    "@AltcoinDailyio",
-    "@AltcoinGordon",
-    "@IncomeSharks",
-    "@ThatMartiniGuy",
-    "@TheDefiant",
-    "@CoinList",
-    "@tokenfi",
-    "@TheCryptoLark",
-    "@Ignasdefi",
-    "@HashLock_",
-    "@CryptoSlate",
-    "@Blockworks_",
-    "@Foresight_News",
-    "@Cointelegraph",
-    "@Delphi_Digital",
-    "@paradigm",
-    "@PanteraCapital",
-    "@multicoincap",
-    "@cdixon",
-    "@packyM",
-    "@DefiLlama",
-    "@BanklessHQ",
-    "@MoonOverlord",
-    "@HaskaTrades",
-    "@milesdeutscher",
-    
-    # EVM ecosystem accounts
-    "@ethereum",
-    "@VitalikButerin",
-    "@ethdotorg",
-    "@0xPolygon",
-    "@arbitrum",
-    "@optimismPBC",
-    "@avax",
-    "@FantomFDN",
-    "@cronos_chain",
-    "@harmonyprotocol",
-    "@MoonbeamNetwork",
-    "@klaytn_official",
-    "@CeloOrg",
-    "@AstarNetwork",
-    "@MetisDAO",
-    "@syscoin",
-    "@HelloTelos",
-    
-    # DeFi and Web3 influencers
+    # TIER 1: Primary news sources for TGE announcements
+    "@TheBlock__",          # The Block - excellent for major announcements
+    "@decryptmedia",        # Decrypt - good DeFi/Web3 coverage
+    "@CoinDesk",            # CoinDesk - industry standard
+    "@DefiantNews",         # The Defiant - DeFi focused
+    "@BanklessHQ",          # Bankless - ecosystem coverage
+    "@DLNewsInfo",          # DL News - quality reporting
+
+    # TIER 2: Influential voices and analysis
+    "@MessariCrypto",       # Messari - research and analysis
+    "@WuBlockchain",        # Wu Blockchain - breaking news
+    "@Delphi_Digital",      # Delphi Digital - research firm
+    "@multicoincap",        # Multicoin Capital - VC perspective
+    "@a16zcrypto",          # a16z crypto - major VC fund
+
+    # TIER 3: Project discovery and early coverage
+    "@CoinList",            # CoinList - token launch platform
+    "@WatcherGuru",         # Watcher Guru - news aggregation
+    "@Foresight_News",      # Foresight News - Asian coverage
+    "@Cointelegraph",       # Cointelegraph - broad coverage
+    "@Blockworks_",         # Blockworks - institutional focus
+
+    # TIER 4: Key ecosystem and thought leaders (selective)
+    "@VitalikButerin",      # Ethereum founder - may comment on projects
+    "@DefiLlama",           # DeFi Llama - analytics, often covers new projects
+    "@ethereum",            # Ethereum Foundation
+    "@arbitrum",            # Arbitrum - Layer 2 ecosystem
+    "@0xPolygon",           # Polygon - ecosystem projects
+    "@OffchainLabs",        # Offchain Labs - Arbitrum team
+
+     # DeFi and Web3 influencers
     "@PatrickAlphaC",
     "@VittoStack",
     "@thatguyintech",
@@ -350,7 +288,6 @@ CORE_NEWS_TWITTERS = [
     "@sandeepnailwal",
     "@el33th4xor",
     "@michaelfkong",
-    "@OffchainLabs",
     "@kelvinfichter",
 ]
 
