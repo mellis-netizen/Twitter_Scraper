@@ -118,14 +118,18 @@ The system uses multi-strategy matching logic:
 ### Required Variables (.env file)
 ```bash
 # Email (Required)
-EMAIL_USER=your-email@gmail.com
-EMAIL_PASSWORD=your-app-password
-RECIPIENT_EMAIL=recipient@example.com
-SMTP_SERVER=smtp.gmail.com
+SMTP_SERVER=smtp.maileroo.com
 SMTP_PORT=587
+EMAIL_USER=offchaintge@2b1078eae1b5e82a.maileroo.org
+EMAIL_PASSWORD=22b87fc6bfe61f3d88380fe7
+RECIPIENT_EMAIL=mellis@offchainlabs.com
 
 # Twitter (Optional)
-TWITTER_BEARER_TOKEN=your-bearer-token
+TWITTER_BEARER_TOKEN=AAAAAAAAAAAAAAAAAAAAAH4h4QEAAAAA39jrNiE98ItaGrVS16b%2Bs4ou5kM%3DRlBPAaf0nwtwUoFTMn8aQ1BbxHJenupe7VAacJY7jxPq05z6yv
+TWITTER_API_KEY=P5B5ZmWfijT6CjDV57PETlKZH
+TWITTER_API_SECRET=RsnmsQlXnvzzZyCJMzzyQDrrREsrIviqdBp3DSnadOFH7Ncbbf
+TWITTER_ACCESS_TOKEN=1510007429286621186-uYkElmasvkubDtv7I8YBr2rm0FD4oo
+TWITTER_ACCESS_TOKEN_SECRET=OTEgpAzJmB1L8KtVCaDISD2haMTgXPZ2FgEf6v4LuRJR8
 
 # Logging (Optional)
 LOG_LEVEL=INFO
