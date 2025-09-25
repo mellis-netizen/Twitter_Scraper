@@ -1,0 +1,117 @@
+name: Deploy to EC2
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:  # Allow manual triggering
+
+env:
+  APP_NAME: crypto-tge-monitor
+  DEPLOY_PATH: /opt/crypto-tge-monitor
+
+jobs:
+  deploy:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to EC2
+      uses: appleboy/ssh-action@v1.0.3
+      with:
+        host: ${{ secrets.EC2_HOST }}
+        username: ${{ secrets.EC2_USERNAME }}
+        key: ${{ secrets.EC2_SSH_KEY }}
+        port: ${{ secrets.EC2_PORT || 22 }}
+        script: |
+          set -e
+
+          # Colors for output
+          GREEN='\033[0;32m'
+          YELLOW='\033[1;33m'
+          RED='\033[0;31m'
+          NC='\033[0m'
+
+          log() {
+              echo -e "${GREEN}[$(date +'%Y-%m-%d %H:%M:%S')] $1${NC}"
+          }
+
+          warn() {
+              echo -e "${YELLOW}[$(date +'%Y-%m-%d %H:%M:%S')] WARNING: $1${NC}"
+          }
+
+          error() {
+              echo -e "${RED}[$(date +'%Y-%m-%d %H:%M:%S')] ERROR: $1${NC}"
+              exit 1
+          }
+
+          log "Starting automated deployment from GitHub..."
+
+          # Stop the service
+          log "Stopping crypto-tge-monitor service..."
+          sudo systemctl stop crypto-tge-monitor || true
+
+          # Create backup
+          log "Creating backup of current deployment..."
+          if [ -d "${{ env.DEPLOY_PATH }}/current" ]; then
+              sudo mv ${{ env.DEPLOY_PATH }}/current ${{ env.DEPLOY_PATH }}/backup-$(date +%Y%m%d_%H%M%S)
+          fi
+
+          # Clone/update repository
+          log "Pulling latest code from GitHub..."
+          if [ -d "${{ env.DEPLOY_PATH }}/repo" ]; then
+              cd ${{ env.DEPLOY_PATH }}/repo
+              sudo git fetch origin
+              sudo git reset --hard origin/main
+              sudo git clean -fd
+          else
+              sudo git clone https://github.com/${{ github.repository }}.git ${{ env.DEPLOY_PATH }}/repo
+              cd ${{ env.DEPLOY_PATH }}/repo
+          fi
+
+          # Deploy new code
+          log "Deploying new application code..."
+          sudo mkdir -p ${{ env.DEPLOY_PATH }}/current
+          sudo cp -r src/ ${{ env.DEPLOY_PATH }}/current/
+          sudo cp config.py ${{ env.DEPLOY_PATH }}/current/
+          sudo cp requirements.txt ${{ env.DEPLOY_PATH }}/current/
+          sudo cp CLAUDE.md ${{ env.DEPLOY_PATH }}/current/
+
+          # Update dependencies
+          log "Updating Python dependencies..."
+          sudo -u crypto-tge-monitor ${{ env.DEPLOY_PATH }}/venv/bin/pip install -r ${{ env.DEPLOY_PATH }}/current/requirements.txt
+
+          # Set proper ownership
+          sudo chown -R crypto-tge-monitor:crypto-tge-monitor ${{ env.DEPLOY_PATH }}/current
+
+          # Start the service
+          log "Starting crypto-tge-monitor service..."
+          sudo systemctl start crypto-tge-monitor
+
+          # Wait and check status
+          sleep 10
+          if sudo systemctl is-active --quiet crypto-tge-monitor; then
+              log "✅ Deployment successful! Service is running."
+              sudo systemctl status crypto-tge-monitor --no-pager -l
+          else
+              error "❌ Service failed to start after deployment!"
+          fi
+
+          log "🚀 Deployment completed successfully!"
+
+    - name: Notify on success
+      if: success()
+      run: |
+        echo "✅ Deployment to EC2 completed successfully!"
+        echo "🔗 Commit: ${{ github.sha }}"
+        echo "👤 Author: ${{ github.actor }}"
+
+    - name: Notify on failure
+      if: failure()
+      run: |
+        echo "❌ Deployment to EC2 failed!"
+        echo "🔗 Commit: ${{ github.sha }}"
+        echo "👤 Author: ${{ github.actor }}"
+        exit 1

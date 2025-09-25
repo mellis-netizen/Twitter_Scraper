@@ -84,7 +84,8 @@ def to_aware_utc(dt_val: Optional[object]) -> Optional[datetime]:
     if isinstance(dt_val, str):
         try:
             dt_val = dtp.parse(dt_val)
-        except Exception:
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Failed to parse datetime: {e}")
             return None
     if not isinstance(dt_val, datetime):
         return None
@@ -97,13 +98,15 @@ _session: Optional[requests.Session] = None
 
 
 def get_session() -> requests.Session:
-    """Shared requests.Session with retry/backoff + friendly headers."""
+    """Shared requests.Session with retry/backoff + friendly headers + connection pooling."""
     global _session
     if _session is None:
         s = requests.Session()
         s.headers.update({
             "User-Agent": "Mozilla/5.0 (compatible; TGE-Monitor/1.0; +https://example.com/bot)",
             "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+            "Accept-Encoding": "gzip, deflate",
+            "Connection": "keep-alive",
         })
         retry = Retry(
             total=3,
@@ -111,47 +114,132 @@ def get_session() -> requests.Session:
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "OPTIONS"],
         )
-        s.mount("http://", HTTPAdapter(max_retries=retry))
-        s.mount("https://", HTTPAdapter(max_retries=retry))
+        # Use connection pooling for better performance
+        adapter = HTTPAdapter(
+            max_retries=retry,
+            pool_connections=20,  # Number of connection pools
+            pool_maxsize=20,      # Maximum number of connections in pool
+            pool_block=False      # Don't block when pool is full
+        )
+        s.mount("http://", adapter)
+        s.mount("https://", adapter)
         _session = s
     return _session
 
 
 def _parse_entries(content: bytes, url: str, logger: logging.Logger, limit: int) -> List[Dict]:
-    parsed = feedparser.parse(content)
+    """Parse RSS/Atom feed with robust error handling and input validation."""
+    if not content or len(content) == 0:
+        logger.warning("Empty content received for %s", url)
+        return []
+    
+    # Limit content size to prevent memory issues
+    if len(content) > 10 * 1024 * 1024:  # 10MB limit
+        logger.warning("Content too large for %s (%d bytes), truncating", url, len(content))
+        content = content[:10 * 1024 * 1024]
+    
+    try:
+        parsed = feedparser.parse(content)
+    except Exception as e:
+        logger.error("Failed to parse feed content for %s: %s", url, e)
+        return []
+    
     if getattr(parsed, "bozo", False):
         logger.warning("RSS feed parsing warning for %s: %s", url, getattr(parsed, "bozo_exception", "unknown"))
 
     items: List[Dict] = []
     max_items = max(1, min(limit, 200))
+    
+    if not hasattr(parsed, 'entries') or not parsed.entries:
+        logger.warning("No entries found in feed %s", url)
+        return []
+    
     for e in parsed.entries[:max_items]:
-        dt: Optional[datetime] = None
-        for key in ("published", "updated", "created"):
-            dt = to_aware_utc(e.get(key))
-            if dt:
-                break
-        if not dt and getattr(e, "published_parsed", None):
-            ts = calendar.timegm(e.published_parsed)  # treat struct_time as UTC
-            dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+        try:
+            # Validate entry structure
+            if not isinstance(e, dict):
+                continue
+                
+            # Extract and validate title
+            title = e.get("title", "")
+            if not isinstance(title, str):
+                title = str(title) if title else ""
+            title = title.strip()[:1000]  # Limit title length
+            
+            # Extract and validate link
+            link = e.get("link", "")
+            if not isinstance(link, str):
+                link = str(link) if link else ""
+            # Basic URL validation
+            if link and not (link.startswith('http://') or link.startswith('https://')):
+                link = ""
+            
+            # Extract and validate summary
+            summary = e.get("summary", "")
+            if not isinstance(summary, str):
+                summary = str(summary) if summary else ""
+            summary = summary.strip()[:2000]  # Limit summary length
+            
+            # Parse date with validation
+            dt: Optional[datetime] = None
+            for key in ("published", "updated", "created"):
+                date_val = e.get(key)
+                if date_val:
+                    try:
+                        dt = to_aware_utc(date_val)
+                        if dt:
+                            break
+                    except Exception as e:
+                        logging.getLogger(__name__).warning(f"Failed to parse date field {key}: {e}")
+                        continue
+                        
+            if not dt and getattr(e, "published_parsed", None):
+                try:
+                    ts = calendar.timegm(e.published_parsed)  # treat struct_time as UTC
+                    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
+                except Exception as e:
+                    logging.getLogger(__name__).warning(f"Failed to parse published_parsed: {e}")
 
-        items.append(
-            {
-                "title": (e.get("title") or "").strip(),
-                "link": e.get("link"),
-                "summary": e.get("summary", ""),
-                "published": dt,
-                "source": url,
-            }
-        )
+            # Only add items with valid data
+            if title or link:  # Must have at least title or link
+                items.append(
+                    {
+                        "title": title,
+                        "link": link,
+                        "summary": summary,
+                        "published": dt,
+                        "source": url,
+                    }
+                )
+        except Exception as e:
+            logger.warning("Error processing entry from %s: %s", url, e)
+            continue
+            
     return items
 
 
-def fetch_feed(url: str, timeout: int = 15, limit: int = 50, logger: Optional[logging.Logger] = None) -> List[Dict]:
+def fetch_feed(url: str, timeout: int = 10, limit: int = 50, logger: Optional[logging.Logger] = None) -> List[Dict]:
     """
     Lenient fetch + parse for a single RSS/Atom URL with a single fallback try.
     Returns list of dicts: {title, link, summary, published(datetime UTC), source}
     """
     L = logger or log
+    
+    # Validate URL
+    if not url or not isinstance(url, str):
+        L.error("Invalid URL provided: %s", url)
+        return []
+    
+    # Basic URL validation
+    if not (url.startswith('http://') or url.startswith('https://')):
+        L.error("URL must start with http:// or https://: %s", url)
+        return []
+    
+    # Limit URL length
+    if len(url) > 2048:
+        L.error("URL too long: %s", url)
+        return []
+    
     sess = get_session()
 
     def _try(u: str) -> List[Dict]:
@@ -194,12 +282,105 @@ class NewsScraper:
         # expose session for health checks
         try:
             self.session = get_session()
-        except Exception:
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Failed to create session: {e}")
             self.session = None
 
         self.total_processed = 0
         self.total_tge_articles = 0
         self._history: List[Dict] = []  # alerts we've emitted (with 'published')
+        self._failed_feeds = set()  # Circuit breaker for failed feeds
+        self._feed_failure_count = {}  # Track failure count per feed
+        self._article_cache = {}  # Cache for processed articles to avoid reprocessing
+        self._cache_max_size = 1000  # Maximum cache size
+
+    def _text_from_alert(self, alert: dict) -> str:
+        """Extract text content from alert for matching."""
+        parts = [
+            alert.get("title", ""),
+            alert.get("summary", ""),
+            alert.get("text", ""),
+            alert.get("content", ""),
+        ]
+        return " ".join([p for p in parts if p]).strip()
+
+    def _matches_company_and_keyword(self, alert: dict) -> bool:
+        """
+        Use the same sophisticated matching logic as main.py
+        """
+        text = self._text_from_alert(alert).lower()
+        if not text:
+            return False
+
+        def _has(token: str) -> bool:
+            token = re.escape(token.strip())
+            return re.search(rf"\b{token}\b", text, flags=re.IGNORECASE) is not None
+
+        def _company_hit() -> bool:
+            for c in COMPANIES:
+                if isinstance(c, dict):
+                    names = [c.get("name","")] + c.get("aliases", [])
+                else:
+                    names = [str(c)]
+                if any(_has(n) for n in names if n):
+                    return True
+            return False
+
+        def _keyword_hit() -> bool:
+            return any(_has(k) for k in TGE_KEYWORDS)
+
+        def _strong_tge_keywords() -> bool:
+            """High-confidence TGE keywords that don't need company match"""
+            strong_keywords = [
+                "token generation event", "tge", "token launch", "token release",
+                "airdrop", "token sale", "ico", "ido", "token distribution"
+            ]
+            return any(_has(k) for k in strong_keywords)
+
+        def _tge_context_words() -> bool:
+            """Context words that suggest TGE when combined with company"""
+            context_words = [
+                "launch", "release", "deploy", "mint", "create", "generate",
+                "announce", "coming", "soon", "date", "schedule", "timeline"
+            ]
+            return any(_has(w) for w in context_words)
+
+        # Strategy 1: Company + keyword (original logic)
+        if _company_hit() and _keyword_hit():
+            return True
+        
+        # Strategy 2: Strong TGE keywords (high confidence standalone)
+        if _strong_tge_keywords():
+            return True
+        
+        # Strategy 3: Company + TGE context words
+        if _company_hit() and _tge_context_words():
+            return True
+
+        return False
+
+    def _extract_mentioned_companies(self, text: str) -> List[str]:
+        """Extract mentioned companies from text."""
+        mentioned = []
+        text_lower = text.lower()
+        for c in COMPANIES:
+            if isinstance(c, dict):
+                names = [c.get("name","")] + c.get("aliases", [])
+            else:
+                names = [str(c)]
+            for name in names:
+                if name and re.search(rf"\b{re.escape(name.lower())}\b", text_lower, flags=re.IGNORECASE):
+                    mentioned.append(name)
+        return sorted(set(mentioned))
+
+    def _extract_found_keywords(self, text: str) -> List[str]:
+        """Extract found keywords from text."""
+        found = []
+        text_lower = text.lower()
+        for keyword in TGE_KEYWORDS:
+            if re.search(rf"\b{re.escape(keyword.lower())}\b", text_lower, flags=re.IGNORECASE):
+                found.append(keyword)
+        return sorted(set(found))
 
     def fetch_rss_feeds(self, urls: List[str], limit_per_feed: int = 50, max_results: int = 100) -> List[Dict]:
         """
@@ -209,11 +390,33 @@ class NewsScraper:
         """
         all_items: List[Dict] = []
         for raw_url in urls:
+            # Circuit breaker: skip feeds that have failed too many times
+            if raw_url in self._failed_feeds:
+                self.logger.debug("Skipping failed feed (circuit breaker): %s", raw_url)
+                continue
+                
             self.logger.info("Fetching RSS feed: %s", raw_url)
-            entries = fetch_feed(raw_url, limit=limit_per_feed, logger=self.logger)
-            if not entries:
-                self.logger.warning("No entries parsed for %s", raw_url)
-            all_items.extend(entries)
+            try:
+                # Add timeout protection for each feed
+                entries = fetch_feed(raw_url, timeout=10, limit=limit_per_feed, logger=self.logger)
+                if not entries:
+                    self.logger.warning("No entries parsed for %s", raw_url)
+                all_items.extend(entries)
+                
+                # Reset failure count on success
+                self._feed_failure_count.pop(raw_url, None)
+                
+            except Exception as e:
+                # Track failures and implement circuit breaker
+                failure_count = self._feed_failure_count.get(raw_url, 0) + 1
+                self._feed_failure_count[raw_url] = failure_count
+                
+                if failure_count >= 3:  # After 3 failures, add to circuit breaker
+                    self._failed_feeds.add(raw_url)
+                    self.logger.warning("Feed %s added to circuit breaker after %d failures", raw_url, failure_count)
+                else:
+                    self.logger.error("Failed to fetch feed %s (attempt %d/3): %s", raw_url, failure_count, str(e))
+                continue
 
         # Keep only items with a date
         items = [i for i in all_items if i.get("published")]
@@ -242,36 +445,60 @@ class NewsScraper:
         # 1) fetch
         articles = self.fetch_rss_feeds(NEWS_SOURCES, limit_per_feed=50, max_results=200)
 
-        # 2) detect mentions
-        companies_lower = [c.lower() for c in COMPANIES]
-        keywords_lower = [k.lower() for k in TGE_KEYWORDS]
-
+        # 2) detect mentions using the same sophisticated logic as main.py
         alerts: List[Dict] = []
         for a in articles:
-            title = a.get("title") or ""
-            summary = a.get("summary") or ""
-            blob = f"{title}\n{summary}".lower()
-
-            mentioned_companies = sorted({c for c in companies_lower if c and c in blob})
-            found_keywords = sorted({k for k in keywords_lower if k and k in blob})
-
-            if not (mentioned_companies or found_keywords):
+            # Create cache key for this article
+            cache_key = a.get("link") or f"{a.get('source', '')}|{a.get('title', '')}"
+            
+            # Check cache first
+            if cache_key in self._article_cache:
+                cached_result = self._article_cache[cache_key]
+                if cached_result:  # If it was a TGE alert, add it
+                    alerts.append(cached_result)
+                continue  # Skip processing
+            
+            # Create alert dict in the format expected by main.py matching logic
+            alert = {
+                "title": a.get("title", ""),
+                "summary": a.get("summary", ""),
+                "text": "",  # Not used for news
+                "content": "",  # Not used for news
+                "url": a.get("link"),
+                "source": a.get("source"),
+                "published": a.get("published"),
+            }
+            
+            # Use the same matching logic as main.py
+            if not self._matches_company_and_keyword(alert):
+                # Cache negative result to avoid reprocessing
+                self._article_cache[cache_key] = None
                 continue
 
-            # lightweight relevance
+            # Extract mentioned companies and keywords for scoring
+            text = self._text_from_alert(alert).lower()
+            mentioned_companies = self._extract_mentioned_companies(text)
+            found_keywords = self._extract_found_keywords(text)
+            
+            # Calculate relevance score
             score = 2.0 * len(mentioned_companies) + 1.0 * len(found_keywords)
 
-            alert = {
-                "title": title,
-                "link": a.get("link"),
-                "summary": summary,
-                "published": a.get("published"),  # aware UTC dt (from fetcher)
-                "source": a.get("source"),
-                "mentioned_companies": [c for c in mentioned_companies],
-                "found_keywords": [k for k in found_keywords],
+            alert.update({
+                "mentioned_companies": mentioned_companies,
+                "found_keywords": found_keywords,
                 "relevance_score": score,
-            }
+            })
+            
+            # Cache positive result
+            self._article_cache[cache_key] = alert
             alerts.append(alert)
+            
+            # Manage cache size
+            if len(self._article_cache) > self._cache_max_size:
+                # Remove oldest 20% of entries
+                keys_to_remove = list(self._article_cache.keys())[:self._cache_max_size // 5]
+                for key in keys_to_remove:
+                    del self._article_cache[key]
 
         # stats + rolling history (dedupe by link)
         self.total_processed += len(articles)
@@ -295,7 +522,8 @@ class NewsScraper:
             return []
         try:
             now = datetime.now(timezone.utc)
-        except Exception:
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Failed to get current time: {e}")
             now = datetime.utcnow().replace(tzinfo=timezone.utc)
         cutoff = now - timedelta(hours=hours)
         out = []
@@ -306,7 +534,8 @@ class NewsScraper:
             try:
                 if dt.tzinfo is None:
                     dt = dt.replace(tzinfo=timezone.utc)
-            except Exception:
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Failed to process timestamp for article: {e}")
                 continue
             if dt >= cutoff:
                 out.append(it)

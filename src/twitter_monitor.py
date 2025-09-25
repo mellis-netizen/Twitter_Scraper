@@ -24,8 +24,8 @@ def _load_since_map() -> dict:
         if os.path.isfile(SINCE_PATH):
             with open(SINCE_PATH, "r", encoding="utf-8") as f:
                 return json.load(f)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Failed to load Twitter since map: {e}")
     return {}
 
 
@@ -47,34 +47,83 @@ def _has_token(text: str, token: str) -> bool:
 
 
 def _matches_company_and_keyword(text: str) -> bool:
+    """
+    Use the same sophisticated matching logic as main.py
+    """
     if not text:
         return False
-    company_hit = False
-    for c in COMPANIES:
-        if isinstance(c, dict):
-            names = [c.get("name", "")] + (c.get("aliases", []) or [])
-        else:
-            names = [str(c)]
-        if any(_has_token(text, n) for n in names if n):
-            company_hit = True
-            break
-    if not company_hit:
+
+    text_lower = text.lower()
+
+    def _has(token: str) -> bool:
+        token = re.escape(token.strip())
+        return re.search(rf"\b{token}\b", text_lower, flags=re.IGNORECASE) is not None
+
+    def _company_hit() -> bool:
+        for c in COMPANIES:
+            if isinstance(c, dict):
+                names = [c.get("name","")] + c.get("aliases", [])
+            else:
+                names = [str(c)]
+            if any(_has(n) for n in names if n):
+                return True
         return False
-    keyword_hit = any(_has_token(text, k) for k in TGE_KEYWORDS)
-    return company_hit and keyword_hit
+
+    def _keyword_hit() -> bool:
+        return any(_has(k) for k in TGE_KEYWORDS)
+
+    def _strong_tge_keywords() -> bool:
+        """High-confidence TGE keywords that don't need company match"""
+        strong_keywords = [
+            "token generation event", "tge", "token launch", "token release",
+            "airdrop", "token sale", "ico", "ido", "token distribution"
+        ]
+        return any(_has(k) for k in strong_keywords)
+
+    def _tge_context_words() -> bool:
+        """Context words that suggest TGE when combined with company"""
+        context_words = [
+            "launch", "release", "deploy", "mint", "create", "generate",
+            "announce", "coming", "soon", "date", "schedule", "timeline"
+        ]
+        return any(_has(w) for w in context_words)
+
+    # Strategy 1: Company + keyword (original logic)
+    if _company_hit() and _keyword_hit():
+        return True
+
+    # Strategy 2: Strong TGE keywords (high confidence standalone)
+    if _strong_tge_keywords():
+        return True
+
+    # Strategy 3: Company + TGE context words
+    if _company_hit() and _tge_context_words():
+        return True
+
+    return False
 
 
 def _call_with_backoff(fn, *args, **kwargs):
-    delay = 60
-    for _ in range(6):
+    delay = 1  # Start with shorter delay
+    max_retries = 3  # Reduced retries
+    for attempt in range(max_retries):
         try:
             return fn(*args, **kwargs)
         except TooManyRequests:
-            time.sleep(delay)
-            delay = min(delay * 2, 15 * 60)
-        except HTTPException:
-            time.sleep(delay)
-            delay = min(delay * 2, 10 * 60)
+            if attempt < max_retries - 1:
+                time.sleep(min(delay, 30))  # Cap delay at 30 seconds
+                delay = min(delay * 2, 30)
+            else:
+                raise
+        except HTTPException as e:
+            if attempt < max_retries - 1:
+                time.sleep(min(delay, 15))  # Cap delay at 15 seconds
+                delay = min(delay * 2, 15)
+            else:
+                raise
+        except Exception as e:
+            # For other exceptions, don't retry
+            raise
     raise RuntimeError("Twitter API retries exhausted")
 
 
@@ -90,6 +139,11 @@ class TwitterMonitor:
 
     def __init__(self):
         self.logger = logging.getLogger("twitter_monitor")
+        
+        # Initialize stats tracking
+        self.total_processed = 0
+        self.total_tge_tweets = 0
+        self._recent_tweets = []  # Cache for recent tweets
 
         bearer = os.getenv("TWITTER_BEARER_TOKEN")
         if not bearer:
@@ -100,13 +154,28 @@ class TwitterMonitor:
             self.accounts: list[str] = []
             self.search_enabled = False
             return
+        
+        # Validate bearer token format
+        if not self._validate_bearer_token(bearer):
+            self.logger.error("Invalid TWITTER_BEARER_TOKEN format; Twitter monitoring disabled")
+            self.client = None
+            self.api = None
+            self._since = {}
+            self.accounts: list[str] = []
+            self.search_enabled = False
+            return
 
         self.client = tweepy.Client(bearer_token=bearer, wait_on_rate_limit=False)
         self.api = self.client  # maintain attribute used elsewhere
 
-        # Accounts: prefer a config var if you have one; else env comma list
+        # Accounts: use config-defined accounts or env comma list
+        from config import TWITTER_ACCOUNTS
         env_users = os.getenv("TWITTER_USERS", "").strip()
-        self.accounts = [u.strip().lstrip("@") for u in env_users.split(",") if u.strip()]  # e.g. "OffchainLabs,arbitrum"
+        if env_users:
+            self.accounts = [u.strip().lstrip("@") for u in env_users.split(",") if u.strip()]
+        else:
+            # Use accounts from config, removing @ symbols
+            self.accounts = [acc.lstrip("@") for acc in TWITTER_ACCOUNTS if acc]
 
         # Toggle search if desired (default on)
         self.search_enabled = os.getenv("TWITTER_ENABLE_SEARCH", "1") not in {"0", "false", "False"}
@@ -117,13 +186,14 @@ class TwitterMonitor:
 
     def process_tweets(self) -> List[Dict]:
         if not self.client:
+            self.logger.warning("Twitter client not available; skipping Twitter processing")
             return []
 
         out: list[dict] = []
 
         # 1) timelines
         if self.accounts:
-            for handle in self.accounts:
+            for handle in self.accounts[:5]:  # Limit to first 5 accounts to prevent hanging
                 try:
                     u = _call_with_backoff(self.client.get_user, username=handle, user_fields=["id"])
                 except Exception as e:
@@ -133,30 +203,89 @@ class TwitterMonitor:
                 if not user:
                     continue
                 uid = str(user.id)
-                out.extend(self._fetch_user_timeline(uid, handle))
-                time.sleep(0.4)  # gentle pacing
+                try:
+                    timeline_results = self._fetch_user_timeline(uid, handle)
+                    out.extend(timeline_results)
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch timeline for {handle}: {e}")
+                    continue
+                time.sleep(0.2)  # Reduced sleep time
 
         # 2) combined queries (company AND keyword)
         if self.search_enabled:
-            out.extend(self._search_company_keyword_batches())
+            try:
+                search_results = self._search_company_keyword_batches()
+                out.extend(search_results)
+            except Exception as e:
+                self.logger.warning(f"Twitter search failed: {e}")
         
         # annotate as twitter and shape minimal fields downstream expects
         for a in out:
             a.setdefault("source", "Twitter")
             a.setdefault("source_type", "twitter")
 
+        # Update stats
+        self.total_processed += len(out)
+        self.total_tge_tweets += len(out)
+        
+        # Cache recent tweets for daily summary
+        self._recent_tweets.extend(out)
+        # Keep only last 100 tweets to avoid memory issues
+        self._recent_tweets = self._recent_tweets[-100:]
+
         # stats
         self.logger.info(f"process_tweets: produced {len(out)} candidate alerts")
         return out
 
+    def _validate_bearer_token(self, token: str) -> bool:
+        """Validate Twitter bearer token format."""
+        if not token or not isinstance(token, str):
+            return False
+        
+        # Remove "Bearer " prefix if present for validation
+        clean_token = token.replace('Bearer ', '') if token.startswith('Bearer ') else token
+        
+        # Basic format validation - Twitter bearer tokens are typically 40+ characters
+        if len(clean_token) < 40:
+            return False
+        
+        # Check for common invalid patterns
+        invalid_patterns = ['your_bearer_token', 'placeholder', 'test', 'example', 'test_bearer_token']
+        if any(pattern in clean_token.lower() for pattern in invalid_patterns):
+            return False
+        
+        return True
+
     def get_recent_tge_tweets(self, hours: int = 24) -> List[Dict]:
-        # Simple shim for daily summary; you can implement a cache if needed
-        return []
+        """Return TGE tweets from the last N hours."""
+        if not self._recent_tweets:
+            return []
+        
+        from datetime import datetime, timezone, timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+        
+        recent = []
+        for tweet in self._recent_tweets:
+            try:
+                # Parse published time
+                published = tweet.get("published")
+                if isinstance(published, str):
+                    published = datetime.fromisoformat(published.replace('Z', '+00:00'))
+                elif not isinstance(published, datetime):
+                    continue
+                    
+                if published >= cutoff:
+                    recent.append(tweet)
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Error processing tweet timestamp: {e}")
+                continue
+                
+        return recent
 
     def get_stats(self) -> Dict:
         return {
-            "total_processed": 0,             # fill if you maintain counters
-            "total_tge_tweets": 0
+            "total_processed": self.total_processed,
+            "total_tge_tweets": self.total_tge_tweets
         }
 
     # -------- internals --------
@@ -180,21 +309,65 @@ class TwitterMonitor:
         newest = since_id
         data = resp.data or []
         for t in data:
-            txt = t.text or ""
-            if not _matches_company_and_keyword(txt):
+            try:
+                # Validate tweet object
+                if not hasattr(t, 'id') or not hasattr(t, 'text'):
+                    continue
+                    
+                # Extract and validate text
+                txt = getattr(t, 'text', '') or ""
+                if not isinstance(txt, str):
+                    txt = str(txt) if txt else ""
+                txt = txt.strip()[:280]  # Limit to tweet length
+                
+                if not txt or not _matches_company_and_keyword(txt):
+                    continue
+                
+                # Validate tweet ID
+                tweet_id = str(getattr(t, 'id', ''))
+                if not tweet_id or not tweet_id.isdigit():
+                    continue
+                
+                # Validate handle
+                if not handle or not isinstance(handle, str):
+                    continue
+                handle = handle.strip().lstrip('@')[:50]  # Limit handle length
+                
+                # Create URL safely
+                url = f"https://x.com/{handle}/status/{tweet_id}"
+                
+                # Parse created_at safely
+                published = None
+                created_at = getattr(t, 'created_at', None)
+                if created_at:
+                    try:
+                        if hasattr(created_at, 'isoformat'):
+                            published = created_at.isoformat()
+                        else:
+                            published = str(created_at)
+                    except Exception:
+                        published = None
+                
+                alerts.append({
+                    "title": f"@{handle}: possible TGE signal",
+                    "text": txt,
+                    "url": url,
+                    "published": published,
+                    "author": handle,
+                    "tweet_id": tweet_id,
+                    "channel": "twitter",
+                })
+                
+                # Update newest ID safely
+                try:
+                    if newest is None or int(tweet_id) > int(newest or 0):
+                        newest = tweet_id
+                except (ValueError, TypeError):
+                    pass
+                    
+            except Exception as e:
+                self.logger.warning(f"Error processing tweet from @{handle}: {e}")
                 continue
-            url = f"https://x.com/{handle}/status/{t.id}"
-            alerts.append({
-                "title": f"@{handle}: possible TGE signal",
-                "text": txt,
-                "url": url,
-                "published": (t.created_at.isoformat() if getattr(t, "created_at", None) else None),
-                "author": handle,
-                "tweet_id": str(t.id),
-                "channel": "twitter",
-            })
-            if newest is None or int(t.id) > int(newest or 0):
-                newest = str(t.id)
 
         if newest is not None:
             self._since[f"user:{user_id}"] = str(newest)

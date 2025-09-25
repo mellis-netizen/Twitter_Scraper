@@ -14,7 +14,9 @@ def validate_config() -> Dict[str, bool]:
         'twitter_config': False,
         'logging_config': False,
         'companies_config': False,
-        'sources_config': False
+        'sources_config': False,
+        'keywords_config': False,
+        'urls_config': False
     }
     
     # Validate email configuration
@@ -30,18 +32,19 @@ def validate_config() -> Dict[str, bool]:
     except Exception as e:
         logging.error(f"Email configuration validation failed: {str(e)}")
     
-    # Validate Twitter configuration
+    # Validate Twitter configuration (Bearer token only for API v2)
     try:
-        twitter_required = ['TWITTER_API_KEY', 'TWITTER_API_SECRET', 'TWITTER_ACCESS_TOKEN', 'TWITTER_ACCESS_TOKEN_SECRET']
-        twitter_optional = ['TWITTER_BEARER_TOKEN']
-        
-        # Twitter is optional, but if any credentials are provided, validate them
-        twitter_creds = [os.getenv(field) for field in twitter_required]
-        if any(twitter_creds):  # If any Twitter creds are provided
-            if all(twitter_creds):  # All required creds must be present
+        bearer_token = os.getenv('TWITTER_BEARER_TOKEN')
+
+        # Twitter is optional, but if bearer token is provided, validate it
+        if bearer_token:
+            # Basic validation for bearer token format
+            if len(bearer_token.strip()) >= 40 and not any(placeholder in bearer_token.lower()
+                                                          for placeholder in ['your_bearer_token', 'placeholder', 'test', 'example']):
                 validation_results['twitter_config'] = True
             else:
-                logging.warning("Twitter configuration incomplete - some required fields missing")
+                logging.warning("Twitter bearer token appears to be invalid")
+                validation_results['twitter_config'] = False
         else:
             validation_results['twitter_config'] = True  # No Twitter config is valid
     except Exception as e:
@@ -76,37 +79,93 @@ def validate_config() -> Dict[str, bool]:
     except Exception as e:
         logging.error(f"Sources configuration validation failed: {str(e)}")
     
+    # Validate keywords configuration
+    try:
+        if TGE_KEYWORDS and len(TGE_KEYWORDS) > 0:
+            # Check for empty or invalid keywords
+            valid_keywords = [k for k in TGE_KEYWORDS if k and isinstance(k, str) and len(k.strip()) > 0]
+            if len(valid_keywords) == len(TGE_KEYWORDS):
+                validation_results['keywords_config'] = True
+            else:
+                logging.warning("Some TGE keywords are invalid or empty")
+        else:
+            logging.warning("No TGE keywords configured")
+    except Exception as e:
+        logging.error(f"Keywords configuration validation failed: {str(e)}")
+    
+    # Validate URLs configuration
+    try:
+        from urllib.parse import urlparse
+        valid_urls = 0
+        for url in NEWS_SOURCES:
+            try:
+                parsed = urlparse(url)
+                if parsed.scheme in ['http', 'https'] and parsed.netloc:
+                    valid_urls += 1
+            except Exception:
+                logging.warning(f"Invalid URL in sources: {url}")
+        
+        if valid_urls > 0:
+            validation_results['urls_config'] = True
+            logging.info(f"Validated {valid_urls}/{len(NEWS_SOURCES)} news source URLs")
+        else:
+            logging.error("No valid URLs found in news sources")
+    except Exception as e:
+        logging.error(f"URL validation failed: {str(e)}")
+    
     return validation_results
 
-# Companies to monitor
+# Companies to monitor (with aliases for better matching)
 COMPANIES = [
-    "Corn",
-    "Corn2", 
-    "Curvance",
-    "Darkbright",
-    "Fabric",
-    "Caldera",
-    "Open Eden",
-    "XAI",
-    "Espresso",
-    "2046 Angels Ltd",
-    "Clique",
-    "TreasureDAO",
-    "Camelot",
-    "DuckChain",
-    "Spacecoin",
-    "FhenixToken",
-    "USD.ai",
-    "Huddle01",
-    "Succinct"
+    {"name": "Corn", "aliases": ["Corn Protocol", "Corn Finance"]},
+    {"name": "Corn2", "aliases": ["Corn2 Protocol"]}, 
+    {"name": "Curvance", "aliases": ["Curvance Finance", "Curvance Protocol"]},
+    {"name": "Darkbright", "aliases": ["Darkbright Labs", "Darkbright Protocol"]},
+    {"name": "Fabric", "aliases": ["Fabric Protocol", "Fabric Labs"]},
+    {"name": "Caldera", "aliases": ["Caldera Labs", "Caldera Protocol"]},
+    {"name": "Open Eden", "aliases": ["OpenEden", "Open Eden Protocol"]},
+    {"name": "XAI", "aliases": ["XAI Games", "Xai", "Xai Games"]},
+    {"name": "Espresso", "aliases": ["Espresso Systems", "Espresso Labs"]},
+    {"name": "2046 Angels Ltd", "aliases": ["2046 Angels", "2046"]},
+    {"name": "Clique", "aliases": ["Clique Protocol", "Clique Labs"]},
+    {"name": "TreasureDAO", "aliases": ["Treasure DAO", "Treasure", "Treasure Protocol"]},
+    {"name": "Camelot", "aliases": ["Camelot DEX", "Camelot Protocol"]},
+    {"name": "DuckChain", "aliases": ["Duck Chain", "DuckChain Protocol"]},
+    {"name": "Spacecoin", "aliases": ["Space Coin", "Spacecoin Protocol"]},
+    {"name": "FhenixToken", "aliases": ["Fhenix", "Fhenix Token", "Fhenix Protocol"]},
+    {"name": "USD.ai", "aliases": ["USDai", "USD AI", "USD.ai Protocol"]},
+    {"name": "Huddle01", "aliases": ["Huddle 01", "Huddle01 Protocol"]},
+    {"name": "Succinct", "aliases": ["Succinct Labs", "Succinct Protocol"]}
 ]
 
-# TGE-related keywords
+# TGE-related keywords (comprehensive list)
 TGE_KEYWORDS = [
+    # Core TGE terms
     "TGE", "token generation event", "token launch", "token release",
     "token distribution", "airdrop", "token sale", "ICO", "IDO",
     "token listing", "token launch date", "token generation",
-    "token deployment", "token minting", "token creation"
+    "token deployment", "token minting", "token creation",
+    
+    # Additional TGE indicators
+    "token launch", "token goes live", "token live", "token trading",
+    "token launchpad", "token presale", "token public sale",
+    "token vesting", "token unlock", "token emission",
+    "token supply", "token economics", "tokenomics",
+    "governance token", "utility token", "security token",
+    "token swap", "token migration", "token bridge",
+    "token staking", "token farming", "token rewards",
+    
+    # Launch-related terms
+    "mainnet launch", "mainnet release", "mainnet deployment",
+    "testnet to mainnet", "beta to mainnet", "alpha to mainnet",
+    "protocol launch", "network launch", "chain launch",
+    "ecosystem launch", "platform launch", "dapp launch",
+    
+    # Announcement terms
+    "announce", "announced", "announcing", "announcement",
+    "launching", "releasing", "deploying", "going live",
+    "coming soon", "launch date", "release date", "go live",
+    "live on", "available on", "trading on", "listed on"
 ]
 
 # Crypto news sources (EVM-focused; removed bitcoin-only outlets)
@@ -193,7 +252,6 @@ NEWS_SOURCES = [
     "https://medium.com/avalancheavax",
     "https://coinjournal.net/feed/",
     "https://avalancheavax.medium.com",
-    "https://medium.com/@telosfoundation",
     "https://blog.fantom.foundation/rss/",
     "https://blog.cronos.org/feed/",  # Cronos
     "https://medium.com/feed/@CeloOrg",  # Celo
@@ -314,12 +372,8 @@ EMAIL_CONFIG = {
     'recipient_email': os.getenv('RECIPIENT_EMAIL', 'mellis@offchainlabs.com')
 }
 
-# Twitter API configuration
+# Twitter API configuration (Bearer token only for API v2)
 TWITTER_CONFIG = {
-    'api_key': os.getenv('TWITTER_API_KEY'),
-    'api_secret': os.getenv('TWITTER_API_SECRET'),
-    'access_token': os.getenv('TWITTER_ACCESS_TOKEN'),
-    'access_token_secret': os.getenv('TWITTER_ACCESS_TOKEN_SECRET'),
     'bearer_token': os.getenv('TWITTER_BEARER_TOKEN')
 }
 

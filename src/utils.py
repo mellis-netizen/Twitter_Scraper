@@ -164,7 +164,8 @@ def validate_url(url: str) -> bool:
         from urllib.parse import urlparse
         result = urlparse(url)
         return all([result.scheme, result.netloc])
-    except Exception:
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"URL validation failed: {e}")
         return False
 
 
@@ -266,8 +267,8 @@ def parse_date_flexible(date_str: str) -> Optional[datetime]:
         parsed_date = email.utils.parsedate_tz(date_str)
         if parsed_date:
             return datetime(*parsed_date[:6])
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Email utils parsing failed: {e}")
     
     return None
 
@@ -427,8 +428,8 @@ def calculate_relevance_score(
         
         if sentiment > 0.1:
             score += sentiment_weight
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Sentiment analysis failed: {e}")
     
     # Urgency indicators
     urgency_words = ['announce', 'launch', 'release', 'coming', 'soon', 'date', 'schedule', 'tomorrow', 'today']
@@ -470,7 +471,8 @@ def extract_domain(url: str) -> str:
         from urllib.parse import urlparse
         domain = urlparse(url).netloc
         return domain.replace('www.', '').split('.')[0].title()
-    except Exception:
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Domain extraction failed: {e}")
         return "Unknown"
 
 

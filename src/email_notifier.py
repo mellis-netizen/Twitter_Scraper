@@ -4,6 +4,7 @@ Email Notification System for Crypto TGE Alerts
 
 import smtplib
 import logging
+import time
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, timezone
@@ -28,19 +29,101 @@ class EmailNotifier:
             self.logger.warning("Email configuration incomplete. Email notifications will be disabled.")
             self.enabled = False
         else:
-            self.enabled = True
+            # Validate configuration
+            if not self._validate_email_config():
+                self.logger.warning("Email configuration validation failed. Email notifications will be disabled.")
+                self.enabled = False
+            else:
+                self.enabled = True
 
     def setup_logging(self):
         """Setup logging configuration."""
         self.logger = logging.getLogger("email_notifier")
 
+    def _sanitize_header(self, header: str) -> str:
+        """Sanitize email header to prevent injection attacks."""
+        if not header or not isinstance(header, str):
+            return ""
+        
+        # Remove newlines and carriage returns to prevent header injection
+        header = header.replace('\r', '').replace('\n', '').replace('\r\n', '')
+        
+        # Limit length
+        header = header[:200]
+        
+        return header.strip()
+
+    def _sanitize_content(self, content: str) -> str:
+        """Sanitize email content."""
+        if not content or not isinstance(content, str):
+            return ""
+        
+        # Remove null bytes and control characters, escape HTML entities
+        import html
+        content = ''.join(char for char in content if ord(char) >= 32 or char in '\t\n\r')
+        content = html.escape(content)
+        
+        # Limit content size to prevent memory issues
+        if len(content) > 1024 * 1024:  # 1MB limit
+            content = content[:1024 * 1024]
+        
+        return content
+
+    def _validate_email_config(self) -> bool:
+        """Validate email configuration."""
+        try:
+            # Validate SMTP server
+            if not self.smtp_server or not isinstance(self.smtp_server, str):
+                self.logger.error("Invalid SMTP server configuration")
+                return False
+            
+            # Validate SMTP port
+            if not isinstance(self.smtp_port, int) or not (1 <= self.smtp_port <= 65535):
+                self.logger.error(f"Invalid SMTP port: {self.smtp_port}")
+                return False
+            
+            # Validate email addresses
+            if not self._validate_email(self.email_user):
+                self.logger.error(f"Invalid sender email: {self.email_user}")
+                return False
+            
+            # Validate recipient emails
+            for recipient in self.recipient_email.split(','):
+                recipient = recipient.strip()
+                if not self._validate_email(recipient):
+                    self.logger.error(f"Invalid recipient email: {recipient}")
+                    return False
+            
+            # Validate password
+            if not self.email_password or len(self.email_password) < 6:
+                self.logger.error("Email password too short or empty")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Email configuration validation error: {str(e)}")
+            return False
+
+    def _validate_email(self, email: str) -> bool:
+        """Validate email address format."""
+        import re
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return bool(re.match(pattern, email)) and len(email) <= 254
+
     # -------------------------
     # Low-level send helper (with detailed SMTP logging)
     # -------------------------
-    def _send_email(self, subject: str, html: str, text: Optional[str] = None) -> bool:
+    def _send_email(self, subject: str, html: str, text: Optional[str] = None, max_retries: int = 3) -> bool:
         if not self.enabled:
             self.logger.warning("Email notifications disabled - configuration incomplete")
             return False
+
+        # Sanitize inputs to prevent header injection
+        subject = self._sanitize_header(subject)
+        html = self._sanitize_content(html)
+        if text:
+            text = self._sanitize_content(text)
 
         # Build MIME message (HTML + optional plain text)
         msg = MIMEMultipart('alternative')
@@ -51,66 +134,93 @@ class EmailNotifier:
             msg.attach(MIMEText(text, 'plain', 'utf-8'))
         msg.attach(MIMEText(html, 'html', 'utf-8'))
 
-        try:
-            use_ssl = str(self.smtp_port) == "465"
-            if use_ssl:
-                server = smtplib.SMTP_SSL(self.smtp_server, self.smtp_port, timeout=20)
-            else:
-                server = smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=20)
-
+        # Retry logic for email sending
+        for attempt in range(max_retries):
             try:
-                # Enable verbose SMTP transcript in logs
-                server.set_debuglevel(1)
-                self.logger.info("Connecting to SMTP %s:%s (SSL=%s)", self.smtp_server, self.smtp_port, use_ssl)
+                use_ssl = str(self.smtp_port) == "465"
+                if use_ssl:
+                    server = smtplib.SMTP_SSL(self.smtp_server, self.smtp_port, timeout=20)
+                else:
+                    server = smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=20)
 
-                # EHLO before auth (and before STARTTLS on 587)
-                code, hello = server.ehlo()
-                self.logger.info("SMTP EHLO: %s %s", code, hello)
-
-                if not use_ssl:
-                    # 587 path: STARTTLS upgrade
-                    code, resp = server.starttls()
-                    self.logger.info("SMTP STARTTLS: %s %s", code, resp)
-                    code, hello2 = server.ehlo()
-                    self.logger.info("SMTP EHLO (post-TLS): %s %s", code, hello2)
-
-                # Login
-                server.login(self.email_user, self.email_password)
-                self.logger.info("SMTP login OK for %s", self.email_user)
-
-                # Support multiple recipients separated by commas
-                from_addr = self.email_user
-                to_addrs = [a.strip() for a in self.recipient_email.split(",") if a.strip()]
-
-                # Use sendmail so we can inspect refused recipients
-                refused = server.sendmail(from_addr, to_addrs, msg.as_string())
-
-                if refused:
-                    # Dict of {recipient: (code, resp)} for failures
-                    self.logger.error("SMTP refused recipients: %s", refused)
-                    return False
-
-                self.logger.info("Email accepted by SMTP server for: %s", to_addrs)
-                return True
-
-            finally:
                 try:
-                    server.quit()
-                except Exception:
-                    server.close()
+                    # Disable debug logging in production (only enable for troubleshooting)
+                    server.set_debuglevel(0)
+                    self.logger.info("Connecting to SMTP %s:%s (SSL=%s) [attempt %d/%d]", 
+                                   self.smtp_server, self.smtp_port, use_ssl, attempt + 1, max_retries)
 
-        except smtplib.SMTPAuthenticationError as e:
-            self.logger.error("SMTP authentication failed: %s", e, exc_info=True)
-            return False
-        except smtplib.SMTPRecipientsRefused as e:
-            self.logger.error("All recipients refused: %s", getattr(e, "recipients", {}), exc_info=True)
-            return False
-        except smtplib.SMTPException as e:
-            self.logger.error("SMTP error: %s", e, exc_info=True)
-            return False
-        except Exception as e:
-            self.logger.error("Unexpected error sending email: %s", e, exc_info=True)
-            return False
+                    # EHLO before auth (and before STARTTLS on 587)
+                    code, hello = server.ehlo()
+                    self.logger.info("SMTP EHLO: %s %s", code, hello)
+
+                    if not use_ssl:
+                        # 587 path: STARTTLS upgrade
+                        code, resp = server.starttls()
+                        self.logger.info("SMTP STARTTLS: %s %s", code, resp)
+                        code, hello2 = server.ehlo()
+                        self.logger.info("SMTP EHLO (post-TLS): %s %s", code, hello2)
+
+                    # Login
+                    server.login(self.email_user, self.email_password)
+                    self.logger.info("SMTP login OK for %s", self.email_user)
+
+                    # Support multiple recipients separated by commas
+                    from_addr = self.email_user
+                    to_addrs = []
+                    for addr in self.recipient_email.split(","):
+                        addr = addr.strip()
+                        if addr and self._validate_email(addr):
+                            to_addrs.append(addr)
+                        elif addr:
+                            self.logger.warning("Invalid email address skipped: %s", addr)
+                    
+                    if not to_addrs:
+                        self.logger.error("No valid recipient email addresses found")
+                        return False
+
+                    # Use sendmail so we can inspect refused recipients
+                    refused = server.sendmail(from_addr, to_addrs, msg.as_string())
+
+                    if refused:
+                        # Dict of {recipient: (code, resp)} for failures
+                        self.logger.error("SMTP refused recipients: %s", refused)
+                        return False
+
+                    self.logger.info("Email accepted by SMTP server for: %s", to_addrs)
+                    return True
+
+                finally:
+                    try:
+                        server.quit()
+                    except Exception:
+                        server.close()
+
+            except smtplib.SMTPAuthenticationError as e:
+                self.logger.error("SMTP authentication failed (attempt %d/%d): %s", attempt + 1, max_retries, e)
+                if attempt == max_retries - 1:
+                    return False
+                time.sleep(2 ** attempt)  # Exponential backoff
+                continue
+            except smtplib.SMTPRecipientsRefused as e:
+                self.logger.error("All recipients refused (attempt %d/%d): %s", attempt + 1, max_retries, getattr(e, "recipients", {}))
+                if attempt == max_retries - 1:
+                    return False
+                time.sleep(2 ** attempt)
+                continue
+            except smtplib.SMTPException as e:
+                self.logger.error("SMTP error (attempt %d/%d): %s", attempt + 1, max_retries, e)
+                if attempt == max_retries - 1:
+                    return False
+                time.sleep(2 ** attempt)
+                continue
+            except Exception as e:
+                self.logger.error("Unexpected error sending email (attempt %d/%d): %s", attempt + 1, max_retries, e)
+                if attempt == max_retries - 1:
+                    return False
+                time.sleep(2 ** attempt)
+                continue
+
+        return False
 
     # -------------------------
     # Public API
@@ -161,19 +271,25 @@ class EmailNotifier:
         if not self.enabled:
             return False
         try:
-            subject = f"📊 Daily TGE Monitor Summary - {datetime.now().strftime('%Y-%m-%d')}"
+            # Use PST timezone for daily summary
+            from datetime import timezone, timedelta
+            pst = timezone(timedelta(hours=-8))  # PST is UTC-8
+            pst_time = datetime.now(pst)
+            
+            subject = f"📊 Daily TGE Monitor Summary - {pst_time.strftime('%Y-%m-%d')}"
             html = f"""
             <!DOCTYPE html>
             <html>
             <head><meta charset="UTF-8"></head>
             <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
                 <div style="max-width:600px;margin:0 auto;padding:20px;">
-                    <h2>📊 Daily Summary — {datetime.now().strftime('%Y-%m-%d')}</h2>
+                    <h2>📊 Daily Summary — {pst_time.strftime('%Y-%m-%d')} (PST)</h2>
                     <ul>
                         <li><strong>Total processed</strong>: {total_processed}</li>
                         <li><strong>News alerts</strong>: {news_count}</li>
                         <li><strong>Twitter alerts</strong>: {twitter_count}</li>
                     </ul>
+                    <p><em>Report generated at {pst_time.strftime('%Y-%m-%d %H:%M:%S')} PST</em></p>
                 </div>
             </body>
             </html>
@@ -322,15 +438,15 @@ class EmailNotifier:
 
                 html += f"""
                         <div class="alert-item">
-                            <div class="alert-title">{(art.get('title') or 'Untitled')}</div>
+                            <div class="alert-title">{self._sanitize_content(art.get('title') or 'Untitled')}</div>
                             <div class="alert-meta">
-                                <strong>Source:</strong> {art.get('source_name','')} |
+                                <strong>Source:</strong> {self._sanitize_content(art.get('source_name',''))} |
                                 <strong>Published:</strong> {pub_str}
                             </div>
                             <div><a href="{art.get('link') or '#'}" class="link" target="_blank">Read Full Article →</a></div>
                             <div style="margin-top: 8px;">{comps}{keys}{score}</div>
                             <div style="margin-top: 8px; font-size: 14px; color: #666;">
-                                {(art.get('summary') or 'No summary available')[:200]}...
+                                {self._sanitize_content((art.get('summary') or 'No summary available')[:200])}...
                             </div>
                         </div>
                 """
@@ -371,7 +487,7 @@ class EmailNotifier:
                                 <strong>Followers:</strong> {tweet.get('user',{}).get('followers_count',0):,}
                             </div>
                             <div><a href="{tweet.get('url') or '#'}" class="link" target="_blank">View Tweet →</a></div>
-                            <div class="tweet-content">{tweet.get('text','')}</div>
+                            <div class="tweet-content">{self._sanitize_content(tweet.get('text',''))}</div>
                             <div style="margin-top: 8px;">{comps}{keys}{score}</div>
                         </div>
                 """

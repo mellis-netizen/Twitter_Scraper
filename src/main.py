@@ -10,21 +10,22 @@ import time
 import logging
 import signal
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Dict, Optional
 import os, json, re, hashlib
 import threading
 import traceback
 
-# Import our modules (run with PYTHONPATH=repository_root and "python -m src.main")
+# Import our modules
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
 from src.news_scraper import NewsScraper
 from src.email_notifier import EmailNotifier
 from src.twitter_monitor import TwitterMonitor
-from src.config import COMPANIES, NEWS_SOURCES, LOG_CONFIG, TGE_KEYWORDS
-from src.utils import (
-    setup_structured_logging, HealthChecker, retry_on_failure,
-    save_json_file, load_json_file
-)
+from config import COMPANIES, NEWS_SOURCES, LOG_CONFIG, TGE_KEYWORDS
+from src.utils import setup_structured_logging, HealthChecker, retry_on_failure
 
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
@@ -65,9 +66,22 @@ def _text_from_alert(alert: dict) -> str:
     return " ".join([p for p in parts if p]).strip()
 
 def matches_company_and_keyword(alert: dict) -> bool:
-    """Require at least one company name AND one keyword in the same alert text."""
+    """
+    Flexible matching: require either:
+    1. Company name AND keyword in same text, OR
+    2. Strong TGE keyword with high confidence, OR  
+    3. Company name with TGE context words
+    """
+    # Validate alert structure
+    if not isinstance(alert, dict):
+        return False
+    
     text = _text_from_alert(alert).lower()
-    if not text:
+    if not text or len(text.strip()) < 10:  # Minimum text length
+        return False
+    
+    # Quality checks
+    if len(text) > 50000:  # Too long, likely spam
         return False
 
     def _has(token: str) -> bool:
@@ -87,7 +101,35 @@ def matches_company_and_keyword(alert: dict) -> bool:
     def _keyword_hit() -> bool:
         return any(_has(k) for k in TGE_KEYWORDS)
 
-    return _company_hit() and _keyword_hit()
+    def _strong_tge_keywords() -> bool:
+        """High-confidence TGE keywords that don't need company match"""
+        strong_keywords = [
+            "token generation event", "tge", "token launch", "token release",
+            "airdrop", "token sale", "ico", "ido", "token distribution"
+        ]
+        return any(_has(k) for k in strong_keywords)
+
+    def _tge_context_words() -> bool:
+        """Context words that suggest TGE when combined with company"""
+        context_words = [
+            "launch", "release", "deploy", "mint", "create", "generate",
+            "announce", "coming", "soon", "date", "schedule", "timeline"
+        ]
+        return any(_has(w) for w in context_words)
+
+    # Strategy 1: Company + keyword (original logic)
+    if _company_hit() and _keyword_hit():
+        return True
+    
+    # Strategy 2: Strong TGE keywords (high confidence standalone)
+    if _strong_tge_keywords():
+        return True
+    
+    # Strategy 3: Company + TGE context words
+    if _company_hit() and _tge_context_words():
+        return True
+
+    return False
 
 def alert_key(alert: dict) -> str:
     """
@@ -105,8 +147,8 @@ def load_seen() -> set[str]:
         if os.path.isfile(SEEN_PATH):
             with open(SEEN_PATH, "r", encoding="utf-8") as f:
                 return set(json.load(f))
-    except Exception:
-        pass
+    except Exception as e:
+        logging.getLogger(__name__).warning(f"Failed to load seen alerts: {e}")
     return set()
 
 def save_seen(seen: set[str]) -> None:
@@ -166,6 +208,23 @@ class CryptoTGEMonitor:
         self.total_alerts_sent = 0
         self.cycle_count = 0
         self.error_count = 0
+        self._last_twitter_processed = 0  # Track Twitter processing for accurate stats
+        
+        # Enhanced metrics
+        self.start_time = datetime.now(timezone.utc)
+        self.cycle_times = []  # Track cycle durations
+        self.feed_failures = {}  # Track feed failure counts
+        self.api_errors = {}  # Track API error counts
+        self.memory_usage = []  # Track memory usage
+        
+        # Watchdog mechanism
+        self.last_successful_cycle = None
+        self.consecutive_failures = 0
+        self.max_consecutive_failures = 5
+        
+        # Circuit breaker reset mechanism
+        self.circuit_breaker_reset_time = 3600  # 1 hour
+        self.last_circuit_breaker_reset = datetime.now(timezone.utc)
 
         # Health monitoring
         self.health_checker = HealthChecker()
@@ -183,8 +242,8 @@ class CryptoTGEMonitor:
             log_path = LOG_CONFIG.get('file')
             if log_path:
                 os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).warning(f"Failed to setup logging directory: {e}")
 
         self.logger = setup_structured_logging(
             LOG_CONFIG['file'],
@@ -208,26 +267,81 @@ class CryptoTGEMonitor:
             if not validation_results.get(comp, False):
                 self.logger.warning(f"Optional component not configured: {comp}")
 
+        # Additional validation
+        self._validate_environment_variables()
+        self._validate_file_permissions()
+        
         self.logger.info("Configuration validation passed")
+
+    def _validate_environment_variables(self):
+        """Validate critical environment variables."""
+        required_vars = ['EMAIL_USER', 'EMAIL_PASSWORD', 'RECIPIENT_EMAIL']
+        missing_vars = []
+        
+        for var in required_vars:
+            if not os.getenv(var):
+                missing_vars.append(var)
+        
+        if missing_vars:
+            self.logger.error(f"Missing required environment variables: {missing_vars}")
+            self.logger.error("Please set these variables in your .env file or environment")
+            sys.exit(1)
+        
+        # Validate email format
+        recipient = os.getenv('RECIPIENT_EMAIL', '')
+        if recipient and not self._is_valid_email(recipient):
+            self.logger.error(f"Invalid recipient email format: {recipient}")
+            sys.exit(1)
+
+    def _validate_file_permissions(self):
+        """Validate file permissions for logs and state."""
+        try:
+            # Check log directory
+            log_dir = os.path.dirname(LOG_CONFIG.get('file', 'logs/crypto_monitor.log'))
+            os.makedirs(log_dir, exist_ok=True)
+            
+            # Test write permission
+            test_file = os.path.join(log_dir, '.test_write')
+            with open(test_file, 'w') as f:
+                f.write('test')
+            os.remove(test_file)
+            
+            # Check state directory
+            state_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "state")
+            os.makedirs(state_dir, exist_ok=True)
+            
+            self.logger.info("File permissions validated successfully")
+        except Exception as e:
+            self.logger.error(f"File permission validation failed: {str(e)}")
+            sys.exit(1)
+
+    def _is_valid_email(self, email: str) -> bool:
+        """Validate email format."""
+        import re
+        pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+        return bool(re.match(pattern, email)) and len(email) <= 254
 
     def setup_health_checks(self):
         """Setup health checks for system components."""
         def check_news_scraper():
             try:
                 return hasattr(self.news_scraper, 'session')
-            except Exception:
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Health check failed for news_scraper: {e}")
                 return False
 
         def check_twitter_monitor():
             try:
                 return True  # Twitter is optional; detailed checks inside module
-            except Exception:
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Health check failed for twitter_monitor: {e}")
                 return False
 
         def check_email_notifier():
             try:
                 return self.email_notifier.enabled
-            except Exception:
+            except Exception as e:
+                logging.getLogger(__name__).warning(f"Health check failed for email_notifier: {e}")
                 return False
 
         self.health_checker.register_check(
@@ -242,16 +356,29 @@ class CryptoTGEMonitor:
 
     def setup_signal_handlers(self):
         """Setup signal handlers for graceful shutdown."""
-        def signal_handler(signum, frame):
+        def signal_handler(signum, _frame):
             self.logger.info(f"Received signal {signum}, shutting down gracefully...")
             self.running = False
+            # Don't call _graceful_shutdown here as it might cause issues in signal context
+            # The main loop will handle cleanup
 
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
+        
+        # Handle SIGUSR1 for status dump
+        def status_handler(_signum, _frame):
+            self.logger.info("Received SIGUSR1, dumping status...")
+            self.print_status()
+        
+        try:
+            signal.signal(signal.SIGUSR1, status_handler)
+        except (ValueError, OSError):
+            # SIGUSR1 not available on all systems
+            pass
 
     def load_state(self):
         """Load application state from file."""
-        state_file = 'logs/monitor_state.json'
+        state_file = os.path.join(STATE_DIR, 'monitor_state.json')
         try:
             if os.path.exists(state_file):
                 with open(state_file, 'r') as f:
@@ -266,24 +393,24 @@ class CryptoTGEMonitor:
 
     def save_state(self):
         """Save application state to file."""
-        state_file = 'logs/monitor_state.json'
+        state_file = os.path.join(STATE_DIR, 'monitor_state.json')
         try:
             state = {
                 'last_run_time': self.last_run_time.isoformat() if self.last_run_time else None,
                 'total_news_processed': self.total_news_processed,
                 'total_tweets_processed': self.total_tweets_processed,
                 'total_alerts_sent': self.total_alerts_sent,
-                'last_updated': datetime.now().isoformat()
+                'last_updated': datetime.now(timezone.utc).isoformat()
             }
             with open(state_file, 'w') as f:
                 json.dump(state, f, indent=2)
         except Exception as e:
             self.logger.error(f"Failed to save application state: {str(e)}")
 
-    @retry_on_failure(max_retries=2, delay=30.0, exceptions=(Exception,))
+    @retry_on_failure(max_retries=1, delay=60.0, exceptions=(Exception,))
     def run_monitoring_cycle(self):
         """Run a complete monitoring cycle."""
-        start_time = datetime.now()
+        start_time = datetime.now(timezone.utc)
         self.cycle_count += 1
 
         self.logger.info(f"Starting monitoring cycle #{self.cycle_count}...")
@@ -297,9 +424,14 @@ class CryptoTGEMonitor:
             # ----------------------
             try:
                 self.logger.info("Processing news articles...")
+                # Track articles processed before processing
+                articles_before = getattr(self.news_scraper, 'total_processed', 0)
                 news_alerts = self.news_scraper.process_articles()
-                self.total_news_processed += len(news_alerts)
-                self.logger.info(f"News processing completed: {len(news_alerts)} alerts found")
+                # Calculate articles processed in this cycle
+                articles_after = getattr(self.news_scraper, 'total_processed', 0)
+                articles_this_cycle = articles_after - articles_before
+                self.total_news_processed += articles_this_cycle
+                self.logger.info(f"News processing completed: {len(news_alerts)} TGE alerts found from {articles_this_cycle} articles")
             except Exception as e:
                 self.logger.error(f"Error processing news articles: {str(e)}", exc_info=True)
                 self.error_count += 1
@@ -308,30 +440,36 @@ class CryptoTGEMonitor:
             # Twitter (hard timeout)
             # ----------------------
             try:
-                if os.getenv("DISABLE_TWITTER") == "1":
-                    self.logger.info("Twitter disabled via DISABLE_TWITTER=1; skipping.")
+                if os.getenv("DISABLE_TWITTER") == "1" or not self.twitter_monitor.client:
+                    self.logger.info("Twitter disabled or not configured; skipping.")
                     twitter_alerts = []
                 else:
                     self.logger.info("Processing Twitter content...")
                     ok, tw_result = run_with_timeout(
                         self.twitter_monitor.process_tweets,
-                        timeout=45.0,
+                        timeout=30.0,  # Reduced timeout
                         logger=self.logger
                     )
                     if ok and isinstance(tw_result, list):
                         twitter_alerts = tw_result
-                        self.total_tweets_processed += len(twitter_alerts)
-                        self.logger.info(f"Twitter processing completed: {len(twitter_alerts)} alerts found")
+                        # Get actual tweets processed (not just TGE alerts)
+                        tweets_this_cycle = getattr(self.twitter_monitor, 'total_processed', 0) - getattr(self, '_last_twitter_processed', 0)
+                        self.total_tweets_processed += tweets_this_cycle
+                        self._last_twitter_processed = getattr(self.twitter_monitor, 'total_processed', 0)
+                        self.logger.info(f"Twitter processing completed: {len(twitter_alerts)} TGE alerts found from {tweets_this_cycle} tweets")
                     elif ok and tw_result is None:
                         # Timed out
                         self.logger.warning("Twitter processing timed out; continuing without Twitter results.")
                     else:
                         # Exception already logged inside run_with_timeout
+                        self.logger.warning("Twitter processing failed; continuing without Twitter results.")
                         self.error_count += 1
-            except Exception:
+                        twitter_alerts = []
+            except Exception as e:
                 # Extra belt-and-suspenders
-                self.logger.error("Unhandled exception during Twitter processing.", exc_info=True)
+                self.logger.error(f"Unhandled exception during Twitter processing: {e}")
                 self.error_count += 1
+                twitter_alerts = []
 
             # ----------------------
             # Filter + de-dupe + email only if NEW relevant alerts
@@ -372,41 +510,104 @@ class CryptoTGEMonitor:
             else:
                 self.logger.info("No *new* relevant TGE alerts found in this cycle")
 
-            # Update state
+            # Update state and reset failure counter on success
             self.last_run_time = start_time
+            self.last_successful_cycle = start_time
+            self.consecutive_failures = 0
             self.save_state()
 
-            # Log cycle summary
-            cycle_duration = (datetime.now() - start_time).total_seconds()
+            # Log cycle summary and collect metrics
+            cycle_duration = (datetime.now(timezone.utc) - start_time).total_seconds()
+            self.cycle_times.append(cycle_duration)
+            
+            # Keep only last 100 cycle times
+            if len(self.cycle_times) > 100:
+                self.cycle_times = self.cycle_times[-100:]
+            
+            # Calculate average cycle time
+            avg_cycle_time = sum(self.cycle_times) / len(self.cycle_times) if self.cycle_times else 0
+            
+            # Track memory usage
+            try:
+                import psutil
+                memory_usage = psutil.Process().memory_info().rss / 1024 / 1024  # MB
+                self.memory_usage.append(memory_usage)
+                if len(self.memory_usage) > 100:
+                    self.memory_usage = self.memory_usage[-100:]
+            except ImportError:
+                memory_usage = 0
+            
             self.logger.info(
-                f"Monitoring cycle #{self.cycle_count} completed in {cycle_duration:.2f}s - "
-                f"Found {len(news_alerts)} news alerts, {len(twitter_alerts)} Twitter alerts"
+                f"Monitoring cycle #{self.cycle_count} completed in {cycle_duration:.2f}s "
+                f"(avg: {avg_cycle_time:.2f}s) - "
+                f"Found {len(news_alerts)} news alerts, {len(twitter_alerts)} Twitter alerts - "
+                f"Memory: {memory_usage:.1f}MB"
             )
 
         except Exception as e:
             self.logger.error(f"Critical error in monitoring cycle: {str(e)}", exc_info=True)
             self.error_count += 1
+            self.consecutive_failures += 1
+            
+            # Watchdog: if too many consecutive failures, take action
+            if self.consecutive_failures >= self.max_consecutive_failures:
+                self.logger.critical(f"System has failed {self.consecutive_failures} consecutive cycles. "
+                                   f"Last successful cycle: {self.last_successful_cycle}")
+                
+                # Send critical alert email
+                try:
+                    self._send_critical_alert()
+                except Exception as alert_error:
+                    self.logger.error(f"Failed to send critical alert: {alert_error}")
+                
+                # Could implement restart logic here
+                # For now, just log and continue
+                
+            # Circuit breaker reset logic
+            self._reset_circuit_breakers_if_needed()
+                
             raise
 
     def send_daily_summary(self):
         """Send daily summary email."""
         self.logger.info("Sending daily summary...")
         try:
-            self.email_notifier.send_daily_summary(
-                news_count=len(self.news_scraper.get_recent_tge_articles(24)),
-                twitter_count=len(self.twitter_monitor.get_recent_tge_tweets(24)),
+            # Get recent alerts with error handling
+            try:
+                news_count = len(self.news_scraper.get_recent_tge_articles(24))
+            except Exception as e:
+                self.logger.warning(f"Failed to get recent news articles: {e}")
+                news_count = 0
+                
+            try:
+                twitter_count = len(self.twitter_monitor.get_recent_tge_tweets(24))
+            except Exception as e:
+                self.logger.warning(f"Failed to get recent tweets: {e}")
+                twitter_count = 0
+            
+            # Send summary
+            success = self.email_notifier.send_daily_summary(
+                news_count=news_count,
+                twitter_count=twitter_count,
                 total_processed=self.total_news_processed + self.total_tweets_processed
             )
+            
+            if success:
+                self.logger.info("Daily summary sent successfully")
+            else:
+                self.logger.error("Failed to send daily summary email")
+                
         except Exception as e:
-            self.logger.error(f"Failed to send daily summary: {str(e)}")
+            self.logger.error(f"Failed to send daily summary: {str(e)}", exc_info=True)
 
     def setup_schedule(self):
         """Setup the monitoring schedule."""
         schedule.every(30).minutes.do(self.run_monitoring_cycle)      # run every 30 minutes
-        schedule.every().day.at("09:00").do(self.send_daily_summary) # daily 09:00 UTC
+        # Schedule daily summary at 9:00 AM PST (17:00 UTC)
+        schedule.every().day.at("17:00").do(self.send_daily_summary)
         self.logger.info("Schedule configured:")
         self.logger.info("- Monitoring cycle: Every 30 minutes")
-        self.logger.info("- Daily summary: 9:00 AM UTC")
+        self.logger.info("- Daily summary: 9:00 AM PST (17:00 UTC)")
 
     def run_once(self):
         """Run a single monitoring cycle and exit."""
@@ -420,21 +621,130 @@ class CryptoTGEMonitor:
         self.setup_schedule()
 
         # Run initial cycle
-        self.run_monitoring_cycle()
+        try:
+            self.run_monitoring_cycle()
+        except Exception as e:
+            self.logger.error(f"Initial cycle failed: {str(e)}", exc_info=True)
 
         # Main loop
         while self.running:
             try:
                 schedule.run_pending()
+                
+                # Periodic health check
+                if self.cycle_count % 10 == 0:  # Every 10 cycles
+                    self._perform_health_check()
+                
                 time.sleep(60)  # Check every minute
             except KeyboardInterrupt:
                 self.logger.info("Received keyboard interrupt, shutting down...")
                 break
             except Exception as e:
                 self.logger.error(f"Error in main loop: {str(e)}", exc_info=True)
+                self.error_count += 1
                 time.sleep(60)  # Wait before retrying
 
-        self.logger.info("Monitoring stopped")
+        # Graceful shutdown
+        self._graceful_shutdown()
+
+    def _graceful_shutdown(self):
+        """Perform graceful shutdown with cleanup."""
+        self.logger.info("Performing graceful shutdown...")
+        self.running = False
+        
+        try:
+            # Save final state
+            self.save_state()
+            self.logger.info("Final state saved")
+        except Exception as e:
+            self.logger.error(f"Error saving final state: {str(e)}")
+        
+        try:
+            # Close any open connections
+            if hasattr(self.news_scraper, 'session') and self.news_scraper.session:
+                self.news_scraper.session.close()
+        except Exception as e:
+            self.logger.error(f"Error closing news scraper session: {str(e)}")
+        
+        self.logger.info("Graceful shutdown completed")
+
+    def _reset_circuit_breakers_if_needed(self):
+        """Reset circuit breakers if enough time has passed."""
+        now = datetime.now(timezone.utc)
+        time_since_reset = (now - self.last_circuit_breaker_reset).total_seconds()
+        
+        if time_since_reset >= self.circuit_breaker_reset_time:
+            self.logger.info("Resetting circuit breakers...")
+            
+            # Reset news scraper circuit breakers
+            if hasattr(self.news_scraper, '_failed_feeds'):
+                failed_count = len(self.news_scraper._failed_feeds)
+                if failed_count > 0:
+                    self.news_scraper._failed_feeds.clear()
+                    self.news_scraper._feed_failure_count.clear()
+                    self.logger.info(f"Reset {failed_count} failed news feeds")
+            
+            # Reset Twitter circuit breakers
+            if hasattr(self.twitter_monitor, '_since'):
+                # Clear old since_ids to force fresh data
+                old_count = len(self.twitter_monitor._since)
+                self.twitter_monitor._since.clear()
+                self.logger.info(f"Reset {old_count} Twitter since_ids")
+            
+            self.last_circuit_breaker_reset = now
+            self.logger.info("Circuit breakers reset completed")
+
+    def _perform_health_check(self):
+        """Perform comprehensive health check."""
+        try:
+            health_results = self.health_checker.run_checks()
+            
+            # Log health status
+            for component, result in health_results.items():
+                if result['status'] == 'error':
+                    self.logger.error(f"Health check failed for {component}: {result.get('error', 'Unknown error')}")
+                elif result['status'] == 'unhealthy':
+                    self.logger.warning(f"Health check unhealthy for {component}")
+                else:
+                    self.logger.debug(f"Health check healthy for {component}")
+            
+            # Check for critical issues
+            error_components = [comp for comp, result in health_results.items() if result['status'] == 'error']
+            if error_components:
+                self.logger.warning(f"Critical health issues detected: {error_components}")
+                
+        except Exception as e:
+            self.logger.error(f"Health check failed: {str(e)}", exc_info=True)
+
+    def _send_critical_alert(self):
+        """Send critical system alert email."""
+        try:
+            subject = "🚨 CRITICAL: TGE Monitor System Failure"
+            html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head><meta charset="UTF-8"></head>
+            <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+                <div style="max-width:600px;margin:0 auto;padding:20px;">
+                    <h2 style="color: #dc3545;">🚨 CRITICAL SYSTEM ALERT</h2>
+                    <p><strong>TGE Monitor System has failed {self.consecutive_failures} consecutive cycles.</strong></p>
+                    <ul>
+                        <li><strong>Last successful cycle:</strong> {self.last_successful_cycle or 'Never'}</li>
+                        <li><strong>Total errors:</strong> {self.error_count}</li>
+                        <li><strong>System uptime:</strong> {datetime.now(timezone.utc) - self.start_time if hasattr(self, 'start_time') else 'Unknown'}</li>
+                        <li><strong>Current time:</strong> {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}</li>
+                    </ul>
+                    <p style="color: #dc3545;"><strong>Immediate attention required!</strong></p>
+                </div>
+            </body>
+            </html>
+            """
+            
+            self.email_notifier._send_email(subject, html)
+            self.logger.info("Critical alert email sent")
+            
+        except Exception as e:
+            self.logger.error(f"Failed to send critical alert email: {str(e)}")
 
     def test_components(self):
         """Test all components individually."""
@@ -449,12 +759,15 @@ class CryptoTGEMonitor:
             self.logger.error(f"❌ News scraper failed: {str(e)}")
 
         # Test Twitter monitor
-        try:
-            self.logger.info("Testing Twitter monitor...")
-            twitter_alerts = self.twitter_monitor.process_tweets()
-            self.logger.info(f"✅ Twitter monitor: Found {len(twitter_alerts)} alerts")
-        except Exception as e:
-            self.logger.error(f"❌ Twitter monitor failed: {str(e)}")
+        if os.getenv("DISABLE_TWITTER") == "1" or not self.twitter_monitor.client:
+            self.logger.info("Twitter monitor disabled; skipping test")
+        else:
+            try:
+                self.logger.info("Testing Twitter monitor...")
+                twitter_alerts = self.twitter_monitor.process_tweets()
+                self.logger.info(f"✅ Twitter monitor: Found {len(twitter_alerts)} alerts")
+            except Exception as e:
+                self.logger.error(f"❌ Twitter monitor failed: {str(e)}")
 
         # Test email notifier
         try:
@@ -469,16 +782,28 @@ class CryptoTGEMonitor:
         self.logger.info("Component testing completed")
 
     def get_status(self):
-        """Get current system status."""
+        """Get current system status with enhanced metrics."""
         health_status = self.health_checker.get_overall_status()
         news_stats = self.news_scraper.get_stats()
         twitter_stats = self.twitter_monitor.get_stats()
+
+        # Calculate enhanced metrics
+        uptime = datetime.now(timezone.utc) - self.start_time if hasattr(self, 'start_time') else None
+        avg_cycle_time = sum(self.cycle_times) / len(self.cycle_times) if self.cycle_times else 0
+        max_cycle_time = max(self.cycle_times) if self.cycle_times else 0
+        min_cycle_time = min(self.cycle_times) if self.cycle_times else 0
+        
+        # Memory metrics
+        current_memory = self.memory_usage[-1] if self.memory_usage else 0
+        avg_memory = sum(self.memory_usage) / len(self.memory_usage) if self.memory_usage else 0
+        max_memory = max(self.memory_usage) if self.memory_usage else 0
 
         status = {
             'running': self.running,
             'last_run_time': self.last_run_time.isoformat() if self.last_run_time else None,
             'cycle_count': self.cycle_count,
             'error_count': self.error_count,
+            'error_rate': (self.error_count / self.cycle_count * 100) if self.cycle_count > 0 else 0,
             'health_status': health_status,
             'total_news_processed': self.total_news_processed,
             'total_tweets_processed': self.total_tweets_processed,
@@ -486,10 +811,23 @@ class CryptoTGEMonitor:
             'companies_monitored': len(COMPANIES),
             'tge_keywords': len(TGE_KEYWORDS),
             'email_enabled': self.email_notifier.enabled,
-            'twitter_enabled': self.twitter_monitor.api is not None if hasattr(self.twitter_monitor, "api") else True,
+            'twitter_enabled': self.twitter_monitor.client is not None if hasattr(self.twitter_monitor, "client") else True,
             'news_stats': news_stats,
             'twitter_stats': twitter_stats,
-            'uptime': str(datetime.now() - self.last_run_time) if self.last_run_time else None
+            'uptime': str(uptime) if uptime else None,
+            'uptime_seconds': uptime.total_seconds() if uptime else 0,
+            'performance': {
+                'avg_cycle_time': round(avg_cycle_time, 2),
+                'max_cycle_time': round(max_cycle_time, 2),
+                'min_cycle_time': round(min_cycle_time, 2),
+                'current_memory_mb': round(current_memory, 1),
+                'avg_memory_mb': round(avg_memory, 1),
+                'max_memory_mb': round(max_memory, 1)
+            },
+            'feed_health': {
+                'failed_feeds': len(getattr(self.news_scraper, '_failed_feeds', set())),
+                'total_feeds': len(NEWS_SOURCES)
+            }
         }
         return status
 
